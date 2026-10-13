@@ -8,11 +8,20 @@ import TopToolbar from './components/TopToolbar.vue'
 import TrackList from './components/TrackList.vue'
 import TimelineRuler from './components/TimelineRuler.vue'
 import PianoRoll from './components/PianoRoll.vue'
+import NoteInspector from './components/NoteInspector.vue'
 import MixerPanel from './components/MixerPanel.vue'
 import VirtualKeyboard from './components/VirtualKeyboard.vue'
 import MasterPanel from './components/MasterPanel.vue'
 import ProjectDialog from './components/ProjectDialog.vue'
-import { clearNoteSelection, deleteSelectedNotes, ensureAudio, state, togglePlay } from './core/store'
+import {
+  clearNoteSelection,
+  deleteSelectedNotes,
+  ensureAudio,
+  nudgeSelectedVelocity,
+  state,
+  togglePlay,
+  transposeSelectedNotes
+} from './core/store'
 
 const historyOpen = ref(false)
 
@@ -38,6 +47,12 @@ function onKeyDown(event: KeyboardEvent): void {
   } else if (event.key === 'Escape') {
     historyOpen.value = false
     clearNoteSelection()
+  } else if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && state.selectedNoteIds.length > 0) {
+    // ↑ / ↓ 调力度，Shift + ↑ / ↓ 移调（专业 DAW 常见的音符微调方式）
+    event.preventDefault()
+    const dir = event.key === 'ArrowUp' ? 1 : -1
+    if (event.shiftKey) transposeSelectedNotes(dir)
+    else nudgeSelectedVelocity(dir * 0.047)
   }
 }
 
@@ -59,10 +74,13 @@ onBeforeUnmount(() => {
     <div class="main">
       <TrackList />
       <div class="editor">
-        <!-- 中央编辑区：钢琴卷帘（含时间总轨）或混音台 -->
+        <!-- 中央编辑区：钢琴卷帘（含时间总轨 + 音符检查器）或混音台 -->
         <template v-if="state.viewMode === 'piano'">
           <TimelineRuler />
-          <PianoRoll />
+          <div class="editor-split">
+            <PianoRoll />
+            <NoteInspector />
+          </div>
         </template>
         <MixerPanel v-else />
       </div>
@@ -97,6 +115,13 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+/* 钢琴卷帘 + 音符检查器 并排 */
+.editor-split {
+  flex: 1;
+  display: flex;
+  min-height: 0;
 }
 
 .bottom {

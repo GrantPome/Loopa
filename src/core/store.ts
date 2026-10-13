@@ -11,8 +11,8 @@ import type {
   Track,
   ViewMode
 } from '@/types'
-import { EQ_MAX, EQ_MIN, INSTRUMENT_LABELS, LIMITER_MAX, LIMITER_MIN, TRACK_COLORS } from '@/types'
-import { beatsPerBarOf, clamp, roundBeat, snapTo, uid } from '@/utils/music'
+import { EQ_MAX, EQ_MIN, INSTRUMENT_LABELS, LIMITER_MAX, LIMITER_MIN, TRACK_COLORS, VELOCITY_MAX, VELOCITY_MIN } from '@/types'
+import { MAX_MIDI, MIN_MIDI, beatsPerBarOf, clamp, roundBeat, snapTo, uid } from '@/utils/music'
 import { audioBufferToWavBlob, downloadBlob } from '@/utils/wav'
 import { getAudioEngine } from './audioEngine'
 import * as storage from './persistence'
@@ -55,6 +55,12 @@ export interface AppState {
   activePitches: number[]
   /** 中央编辑区当前展示的视图 */
   viewMode: ViewMode
+  /** 钢琴卷帘底部力度编辑条是否展开 */
+  velocityLaneOn: boolean
+  /** 音符是否按力度着色（低力度冷色、高力度暖色） */
+  noteColorByVelocity: boolean
+  /** 虚拟键盘 / 试听的力度 0~1 */
+  keyboardVelocity: number
   /** 各轨道实时电平 0~1（键为轨道 id） */
   levels: Record<string, number>
   /** 总线输出电平 0~1 */
@@ -178,6 +184,9 @@ export const state = reactive<AppState>({
   loopOn: true,
   activePitches: [],
   viewMode: 'piano',
+  velocityLaneOn: true,
+  noteColorByVelocity: false,
+  keyboardVelocity: 0.85,
   levels: {},
   masterLevel: 0,
   limiting: false,
@@ -505,6 +514,171 @@ export function clearNoteSelection(): void {
   state.selectedNoteIds = []
 }
 
+// ------------------------------------------------------------ 力度编辑
+
+/**
+ * 当前力度编辑的作用对象：
+ * 有选中音符时只作用于选中项，否则作用于当前片段的全部音符
+ * （与「量化」的行为保持一致，方便整段快速调整）。
+ */
+function velocityTargetIds(): string[] {
+  if (state.selectedNoteIds.length > 0) return [...state.selectedNoteIds]
+  const region = activeRegion()
+  return region ? region.notes.map((n) => n.id) : []
+}
+
+function notesByIds(ids: string[]): Note[] {
+  const region = activeRegion()
+  if (!region || ids.length === 0) return []
+  const set = new Set(ids)
+  return region.notes.filter((n) => set.has(n.id))
+}
+
+/** 批量写入力度（绝对 0~1），一次性提交，避免逐音符重排音频 */
+export function applyNoteVelocities(entries: { id: string; velocity: number }[]): void {
+  if (entries.length === 0) return
+  const map = new Map(entries.map((e) => [e.id, clamp(e.velocity, VELOCITY_MIN, VELOCITY_MAX)]))
+  const region = activeRegion()
+  if (!region) return
+  for (const note of region.notes) {
+    const value = map.get(note.id)
+    if (value !== undefined) note.velocity = value
+  }
+  commit()
+}
+
+/** 把目标音符的力度统一设为某个值（0~1） */
+export function setTargetVelocity(velocity: number): number {
+  const ids = velocityTargetIds()
+  applyNoteVelocities(ids.map((id) => ({ id, velocity })))
+  return ids.length
+}
+
+/** 力度相对增减（delta 为 0~1 的线性增量，如 ±0.05） */
+export function nudgeTargetVelocity(delta: number): number {
+  const ids = velocityTargetIds()
+  const notes = notesByIds(ids)
+  applyNoteVelocities(notes.map((n) => ({ id: n.id, velocity: n.velocity + delta })))
+  return notes.length
+}
+
+/** 力度按比例缩放（factor 如 0.8 / 1.25） */
+export function scaleTargetVelocity(factor: number): number {
+  const ids = velocityTargetIds()
+  const notes = notesByIds(ids)
+  applyNoteVelocities(notes.map((n) => ({ id: n.id, velocity: n.velocity * factor })))
+  return notes.length
+}
+
+/** 力度人性化：在现有力度上叠加 ±amount 的随机抖动，避免机械感 */
+export function humanizeTargetVelocity(amount = 0.1): number {
+  const ids = velocityTargetIds()
+  const notes = notesByIds(ids)
+  applyNoteVelocities(
+    notes.map((n) => ({ id: n.id, velocity: n.velocity + (Math.random() * 2 - 1) * amount }))
+  )
+  return notes.length
+}
+
+// ------------------------------------------------------------ 音符精确编辑
+
+/** 修改选中音符的公共属性（音高/起始/时长/力度），供检查器面板使用 */
+export function patchSelectedNotes(
+  patch: Partial<Pick<Note, 'midi' | 'start' | 'duration' | 'velocity'>>
+): void {
+  const notes = notesByIds(state.selectedNoteIds)
+  if (notes.length === 0) return
+  let maxEnd = 0
+  for (const note of notes) {
+    if (patch.midi !== undefined) note.midi = clamp(Math.round(patch.midi), MIN_MIDI, MAX_MIDI)
+    if (patch.start !== undefined) note.start = roundBeat(Math.max(0, patch.start))
+    if (patch.duration !== undefined) note.duration = roundBeat(Math.max(0.0625, patch.duration))
+    if (patch.velocity !== undefined) note.velocity = clamp(patch.velocity, VELOCITY_MIN, VELOCITY_MAX)
+    maxEnd = Math.max(maxEnd, note.start + note.duration)
+  }
+  ensureBarsForBeat(maxEnd)
+  commit()
+}
+
+/** 把选中音符整体移调（半音） */
+export function transposeSelectedNotes(semitones: number): void {
+  const notes = notesByIds(state.selectedNoteIds)
+  if (notes.length === 0 || semitones === 0) return
+  for (const note of notes) {
+    note.midi = clamp(note.midi + semitones, MIN_MIDI, MAX_MIDI)
+  }
+  commit()
+}
+
+/** 选中音符的力度整体增减（快捷键使用，delta 为 0~1） */
+export function nudgeSelectedVelocity(delta: number): number {
+  const notes = notesByIds(state.selectedNoteIds)
+  if (notes.length === 0) return 0
+  applyNoteVelocities(notes.map((n) => ({ id: n.id, velocity: n.velocity + delta })))
+  return notes.length
+}
+
+// ------------------------------------------------------------ 复制 / 粘贴
+
+/** 音符剪贴板（仅内存保存，不参与持久化）；start 已归一化为相对第一个音符的偏移 */
+let noteClipboard: Note[] = []
+
+/** 复制选中音符到内部剪贴板 */
+export function copySelectedNotes(): number {
+  const notes = notesByIds(state.selectedNoteIds)
+  if (notes.length === 0) return 0
+  const origin = Math.min(...notes.map((n) => n.start))
+  noteClipboard = notes.map((n) => ({ ...n, start: roundBeat(n.start - origin) }))
+  return notes.length
+}
+
+/** 剪切选中音符 */
+export function cutSelectedNotes(): number {
+  const count = copySelectedNotes()
+  if (count > 0) deleteSelectedNotes()
+  return count
+}
+
+/** 把剪贴板内容粘贴到播放头位置（保持音符之间的相对位置） */
+export function pasteNotes(): number {
+  const region = activeRegion()
+  if (!region || noteClipboard.length === 0) return 0
+  const base = roundBeat(Math.max(0, state.playheadBeats))
+  const created: Note[] = []
+  let maxEnd = 0
+  for (const item of noteClipboard) {
+    const note: Note = { ...item, id: uid('note'), start: roundBeat(base + item.start) }
+    region.notes.push(note)
+    created.push(note)
+    maxEnd = Math.max(maxEnd, note.start + note.duration)
+  }
+  state.selectedNoteIds = created.map((n) => n.id)
+  ensureBarsForBeat(maxEnd)
+  commit()
+  return created.length
+}
+
+/** 再制选中音符：整组紧跟选区末尾平移一份 */
+export function duplicateSelectedNotes(): number {
+  const region = activeRegion()
+  const notes = notesByIds(state.selectedNoteIds)
+  if (!region || notes.length === 0) return 0
+  const origin = Math.min(...notes.map((n) => n.start))
+  const span = Math.max(...notes.map((n) => n.start + n.duration)) - origin
+  const created: Note[] = []
+  let maxEnd = 0
+  for (const n of notes) {
+    const note: Note = { ...n, id: uid('note'), start: roundBeat(n.start + span) }
+    region.notes.push(note)
+    created.push(note)
+    maxEnd = Math.max(maxEnd, note.start + note.duration)
+  }
+  state.selectedNoteIds = created.map((n) => n.id)
+  ensureBarsForBeat(maxEnd)
+  commit()
+  return created.length
+}
+
 // ------------------------------------------------------------ 工程级设置
 
 export function setBpm(bpm: number): void {
@@ -549,6 +723,21 @@ export function setSnapDivision(division: GridDivision): void {
 /** 切换中央编辑区视图：钢琴卷帘 / 混音台 */
 export function setViewMode(mode: ViewMode): void {
   state.viewMode = mode
+}
+
+/** 展开 / 收起钢琴卷帘底部的力度编辑条 */
+export function toggleVelocityLane(): void {
+  state.velocityLaneOn = !state.velocityLaneOn
+}
+
+/** 切换「按力度着色」显示 */
+export function toggleNoteColor(): void {
+  state.noteColorByVelocity = !state.noteColorByVelocity
+}
+
+/** 设置虚拟键盘 / 试听力度（0~1） */
+export function setKeyboardVelocity(velocity: number): void {
+  state.keyboardVelocity = clamp(velocity, VELOCITY_MIN, VELOCITY_MAX)
 }
 
 export function toggleMetronome(): void {
@@ -623,8 +812,8 @@ export function seek(beats: number): void {
 
 // ---------------------------------------------------------------- 虚拟键盘高亮
 
-/** 屏幕键盘：按下发声（需要音频上下文已激活） */
-export function previewAttack(trackId: string, midi: number, velocity = 0.85): void {
+/** 屏幕键盘：按下发声（需要音频上下文已激活），力度取自键盘力度设置 */
+export function previewAttack(trackId: string, midi: number, velocity = state.keyboardVelocity): void {
   engine.previewAttack(trackId, midi, velocity)
 }
 

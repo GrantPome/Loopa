@@ -14,3 +14,6 @@ export const MAX_RULER_LANES = 6
 
 /** 自定义滚动条尺寸（与 global.css 中保持一致） */
 export const SCROLLBAR_SIZE = 10
+
+/** 钢琴卷帘底部力度编辑条高度（px） */
+export const VELOCITY_LANE_HEIGHT = 78

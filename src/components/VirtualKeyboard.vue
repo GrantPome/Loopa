@@ -6,8 +6,9 @@
  * - 支持电脑键盘映射：A W S E D F T G Y H U J K → 一个八度
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { activeTrack, previewAttack, previewRelease, state } from '@/core/store'
+import { activeTrack, previewAttack, previewRelease, setKeyboardVelocity, state } from '@/core/store'
 import { clamp, midiToNoteName } from '@/utils/music'
+import { velocityToMidi } from '@/utils/audio'
 
 /** 白键半音偏移（一个八度内） */
 const WHITE_OFFSETS = [0, 2, 4, 5, 7, 9, 11]
@@ -125,6 +126,13 @@ function shiftOctave(delta: number): void {
   baseMidi.value = clamp(baseMidi.value + delta * 12, 12, 96 - (OCTAVES * 12 - 1))
 }
 
+// ---------------------------------------------------------------- 力度
+
+/** 调整弹奏力度（0~1），影响试听与键盘演奏的强弱 */
+function onVelocityInput(event: Event): void {
+  setKeyboardVelocity(Number((event.target as HTMLInputElement).value))
+}
+
 // ---------------------------------------------------------------- 电脑键盘
 
 function onWindowKeyDown(event: KeyboardEvent): void {
@@ -168,6 +176,18 @@ onBeforeUnmount(() => {
       <span class="label">{{ midiToNoteName(baseMidi) }} ~ {{ midiToNoteName(baseMidi + OCTAVES * 12 - 1) }}</span>
       <button class="mini" title="升高八度" @click="shiftOctave(1)">▶</button>
       <span class="gap" />
+      <label class="vel" title="弹奏力度（0~127）">
+        力度
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          :value="state.keyboardVelocity"
+          @input="onVelocityInput"
+        />
+        <span class="vel-val">{{ velocityToMidi(state.keyboardVelocity) }}</span>
+      </label>
       <span class="dim">正在弹奏：{{ instrumentLabel }}</span>
     </div>
 
@@ -230,6 +250,25 @@ onBeforeUnmount(() => {
 .mini {
   padding: 1px 7px;
   font-size: 11px;
+}
+
+.vel {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.vel input[type='range'] {
+  width: 76px;
+}
+
+.vel-val {
+  width: 26px;
+  text-align: right;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 
 .keys {

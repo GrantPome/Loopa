@@ -7,6 +7,7 @@
 import { computed } from 'vue'
 import type { Track } from '@/types'
 import { EQ_BANDS, EQ_MAX, EQ_MIN, LIMITER_MAX, LIMITER_MIN } from '@/types'
+import { gainToDbText } from '@/utils/audio'
 import {
   resetTrackMix,
   selectTrack,
@@ -23,12 +24,6 @@ import {
 } from '@/core/store'
 
 const tracks = computed(() => state.project.tracks)
-
-/** 音量（0~1 线性）转成 dB 显示，0 显示为 -∞ */
-function volumeToDb(volume: number): string {
-  if (volume <= 0.001) return '-∞'
-  return `${(20 * Math.log10(volume)).toFixed(1)}`
-}
 
 /** 电平 0~1 转成百分比高度（做一次开方，让小音量也看得见变化） */
 function levelPercent(level: number): number {
@@ -99,7 +94,7 @@ const panText = (pan: number): string => {
               @input="onVolumeInput(track, $event)"
             />
           </div>
-          <div class="db">{{ volumeToDb(track.volume) }}</div>
+          <div class="db">{{ gainToDbText(track.volume) }}</div>
         </div>
 
         <!-- 声像 -->
@@ -193,7 +188,7 @@ const panText = (pan: number): string => {
             @input="onMasterInput"
           />
         </div>
-        <div class="db">{{ volumeToDb(state.project.masterVolume) }}</div>
+        <div class="db">{{ gainToDbText(state.project.masterVolume) }}</div>
       </div>
 
       <div class="led-row">

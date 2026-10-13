@@ -52,26 +52,13 @@ export function roundBeat(value: number): number {
 }
 
 /**
- * 把「拍」转换为 Tone.Transport 的时间表示 "小节:拍:十六分"。
- * 使用这种相对表示法，BPM 变化时已排期的音符会自动重新缩放。
+ * 把「拍」转换为 Tone.Transport 的 tick 表示（如 "384i"）。
+ * 使用 tick 这种音乐时间单位，BPM 变化时已排期的音符会自动重新缩放；
+ * 相比 "小节:拍:十六分" 的三段式表示，tick 分辨率更高，
+ * 可以精确表达三十二分音符等更细的网格。
  */
-export function beatsToTransportTime(beats: number, beatsPerBar: number): string {
-  const safe = Math.max(0, beats)
-  let bar = Math.floor(safe / beatsPerBar)
-  let rest = safe - bar * beatsPerBar
-  let beat = Math.floor(rest)
-  let sixteenth = Math.round((rest - beat) * 4)
-
-  // 四舍五入后可能出现 4 个十六分音符，需要进位
-  if (sixteenth >= 4) {
-    sixteenth = 0
-    beat += 1
-  }
-  if (beat >= beatsPerBar) {
-    beat = 0
-    bar += 1
-  }
-  return `${bar}:${beat}:${sixteenth}`
+export function beatsToTicks(beats: number, ppq: number): string {
+  return `${Math.round(Math.max(0, beats) * ppq)}i`
 }
 
 /** 拍 -> 秒 */
@@ -96,5 +83,14 @@ export function formatPosition(beats: number, beatsPerBar: number): string {
 
 /** 网格精度对应的显示名 */
 export function gridLabel(grid: GridDivision): string {
-  return grid === 0.25 ? '16 分音符' : '8 分音符'
+  switch (grid) {
+    case 1:
+      return '四分音符'
+    case 0.5:
+      return '八分音符'
+    case 0.125:
+      return '三十二分音符'
+    default:
+      return '十六分音符'
+  }
 }

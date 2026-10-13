@@ -27,8 +27,15 @@ export type DrumInstrumentType = 'drums' | 'electroDrums'
 /** 全部内置音色 */
 export type InstrumentType = MelodicInstrumentType | DrumInstrumentType
 
-/** 网格精度：0.25 = 16 分音符，0.5 = 8 分音符（单位：拍） */
-export type GridDivision = 0.25 | 0.5
+/**
+ * 网格精度（单位：拍）
+ * 1 = 四分音符，0.5 = 八分音符，0.25 = 十六分音符，0.125 = 三十二分音符
+ */
+export type GridDivision = 1 | 0.5 | 0.25 | 0.125
+
+/** 力度范围（0~1 线性） */
+export const VELOCITY_MIN = 0
+export const VELOCITY_MAX = 1
 
 /** 单个音符 */
 export interface Note {

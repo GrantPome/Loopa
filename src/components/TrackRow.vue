@@ -17,6 +17,7 @@ import {
   toggleMute,
   toggleSolo
 } from '@/core/store'
+import { gainToDbText } from '@/utils/audio'
 
 const props = defineProps<{ track: Track; index: number }>()
 
@@ -76,10 +77,10 @@ function onPanInput(event: Event): void {
         max="1"
         step="0.01"
         :value="track.volume"
-        title="音量推子 0~1"
+        title="音量推子（显示为 dB）"
         @input="onVolumeInput"
       />
-      <span class="value">{{ Math.round(track.volume * 100) }}</span>
+      <span class="value" title="增益（dB）">{{ gainToDbText(track.volume) }}</span>
     </div>
 
     <div class="line slider-line">

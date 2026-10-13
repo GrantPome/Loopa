@@ -1,6 +1,6 @@
 import * as Tone from 'tone'
 import type { EqBand, Project, Track, TimeSignature } from '@/types'
-import { beatsPerBarOf, beatsToTransportTime, midiToNoteName } from '@/utils/music'
+import { beatsPerBarOf, beatsToTicks, midiToNoteName } from '@/utils/music'
 import { createInstrument, isDrumTrack, type InstrumentNode } from './instruments'
 
 /**
@@ -281,7 +281,7 @@ class AudioEngine {
     for (const id of this.noteEventIds) t.clear(id)
     this.noteEventIds = []
 
-    const bpb = beatsPerBarOf(project.timeSignature)
+    const ppq = t.PPQ
 
     for (const track of project.tracks) {
       const channel = this.channels.get(track.id)
@@ -290,7 +290,7 @@ class AudioEngine {
 
       for (const region of track.regions) {
         for (const note of region.notes) {
-          const at = beatsToTransportTime(region.start + note.start, bpb)
+          const at = beatsToTicks(region.start + note.start, ppq)
           const eventId = t.schedule((time: number) => {
             // 时长在触发瞬间按当前 BPM 计算，跟随变速
             const seconds = note.duration * (60 / t.bpm.value)
@@ -305,7 +305,7 @@ class AudioEngine {
 
     // 循环区间始终覆盖整个工程长度
     t.loopStart = 0
-    t.loopEnd = beatsToTransportTime(project.bars * bpb, bpb)
+    t.loopEnd = beatsToTicks(project.bars * beatsPerBarOf(project.timeSignature), ppq)
   }
 
   // ------------------------------------------------------------ 播放控制
@@ -503,7 +503,7 @@ class AudioEngine {
         const drum = isDrumTrack(track.instrument)
         for (const region of track.regions) {
           for (const note of region.notes) {
-            const at = beatsToTransportTime(region.start + note.start, bpb)
+            const at = beatsToTicks(region.start + note.start, transport.PPQ)
             const seconds = note.duration * secondsPerBeat
             transport.schedule((time) => {
               if (drum) node.triggerAttackRelease(note.midi, seconds, time, note.velocity)

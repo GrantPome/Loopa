@@ -12,24 +12,40 @@ import {
   activeRegion,
   activeTrack,
   addNote,
+  applyNoteVelocities,
   clearNoteSelection,
   commit,
   deleteSelectedNotes,
   ensureBarsForBeat,
+  humanizeTargetVelocity,
+  nudgeTargetVelocity,
   previewAttack,
   quantizeSelected,
   removeNotes,
+  scaleTargetVelocity,
   setNoteSelection,
+  setTargetVelocity,
   state,
-  toggleNoteSelection
+  toggleNoteColor,
+  toggleNoteSelection,
+  toggleVelocityLane
 } from '@/core/store'
 import { MAX_MIDI, MIN_MIDI, beatsPerBarOf, clamp, isBlackKey, midiToNoteName, roundBeat, snapTo } from '@/utils/music'
+import { midiToVelocity, velocityToMidi } from '@/utils/audio'
 import { hexToRgba } from '@/utils/color'
-import { KEY_WIDTH, SCROLLBAR_SIZE } from '@/utils/layout'
+import { KEY_WIDTH, SCROLLBAR_SIZE, VELOCITY_LANE_HEIGHT } from '@/utils/layout'
 
 const bodyEl = ref<HTMLDivElement | null>(null)
 const gridEl = ref<HTMLCanvasElement | null>(null)
 const keysEl = ref<HTMLCanvasElement | null>(null)
+const velocityEl = ref<HTMLCanvasElement | null>(null)
+
+/** 力度编辑条高度 */
+const LANE_H = VELOCITY_LANE_HEIGHT
+/** 力度编辑条拖动时的实时读数（MIDI 力度 0~127），未拖动时为 null */
+const laneReadout = ref<number | null>(null)
+/** 力度编辑条是否有选中（用于高亮提示） */
+const laneSelected = computed(() => state.selectedNoteIds.length > 0)
 
 /** 视口顶部对应的 MIDI 音号（数值越大音越高，画布 y 越小） */
 const topMidi = ref(84)
@@ -69,6 +85,17 @@ const drag: {
 }
 
 // ---------------------------------------------------------------- 绘制工具
+
+/**
+ * 力度着色：低力度偏冷（蓝），高力度偏暖（红），
+ * 让「按力度着色」模式下一眼能看出强弱分布。
+ */
+function velocityColor(velocity: number): string {
+  const v = clamp(velocity, 0, 1)
+  const hue = 205 - 205 * v
+  const light = 46 + v * 14
+  return `hsl(${hue.toFixed(0)}, 78%, ${light.toFixed(0)}%)`
+}
 
 function prepareCanvas(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number) {
   const dpr = window.devicePixelRatio || 1
@@ -184,9 +211,9 @@ function drawGrid(): void {
       const h = Math.max(4, rowH - 2)
       const isSelected = selected.has(note.id)
 
-      // 力度映射透明度，形成简单的力度可视化
+      // 力度映射透明度，形成简单的力度可视化；开启「按力度着色」时改用冷→暖渐变
       ctx.globalAlpha = 0.45 + note.velocity * 0.55
-      ctx.fillStyle = color
+      ctx.fillStyle = state.noteColorByVelocity ? velocityColor(note.velocity) : color
       roundRectPath(ctx, x, y + 1, w, h, 3)
       ctx.fill()
       ctx.globalAlpha = 1
@@ -277,6 +304,183 @@ function drawKeys(): void {
   }
 }
 
+// ---------------------------------------------------------------- 力度编辑条
+
+/** 力度条上一根柱子（对应一个音符）的宽度 */
+function laneBarWidth(note: Note): number {
+  const px = state.view.pxPerBeat
+  return clamp(note.duration * px - 1, 3, 18)
+}
+
+/** 绘制力度编辑条：每个音符一根柱子，柱高代表力度 */
+function drawVelocity(): void {
+  const canvas = velocityEl.value
+  if (!canvas) return
+  const cssWidth = canvas.clientWidth
+  const cssHeight = canvas.clientHeight
+  const ctx = prepareCanvas(canvas, cssWidth, cssHeight)
+  if (!ctx) return
+  ctx.clearRect(0, 0, cssWidth, cssHeight)
+
+  // 背景 + 参考线（1/2、1/4 力度）
+  ctx.fillStyle = '#14151a'
+  ctx.fillRect(0, 0, cssWidth, cssHeight)
+  ctx.fillStyle = 'rgba(255,255,255,0.06)'
+  ctx.fillRect(0, Math.round(cssHeight * 0.5), cssWidth, 1)
+  ctx.fillRect(0, Math.round(cssHeight * 0.25), cssWidth, 1)
+  ctx.fillStyle = 'rgba(255,255,255,0.16)'
+  ctx.fillRect(0, 0, cssWidth, 1)
+
+  const active = region.value
+  if (!active) return
+  const px = state.view.pxPerBeat
+  const body = bodyEl.value
+  // 只绘制视口内的柱子（画布已随滚动做了位移，这里用滚动范围做裁剪）
+  const viewL = body?.scrollLeft ?? 0
+  const viewR = viewL + cssWidth
+  const selected = new Set(state.selectedNoteIds)
+  const color = trackColor.value
+
+  for (const note of active.notes) {
+    const x = note.start * px
+    if (x > viewR || x + 40 < viewL) continue
+    const barW = laneBarWidth(note)
+    const barH = Math.max(2, note.velocity * (cssHeight - 6))
+    const isSelected = selected.has(note.id)
+    ctx.globalAlpha = isSelected ? 1 : 0.8
+    ctx.fillStyle = isSelected ? '#ffffff' : state.noteColorByVelocity ? velocityColor(note.velocity) : color
+    roundRectPath(ctx, x, cssHeight - barH - 2, barW, barH, 2)
+    ctx.fill()
+    ctx.globalAlpha = 1
+  }
+}
+
+/** 力度条坐标 → 画布本地坐标 */
+function laneLocal(event: PointerEvent): { x: number; y: number } {
+  const canvas = velocityEl.value
+  if (!canvas) return { x: 0, y: 0 }
+  const rect = canvas.getBoundingClientRect()
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top }
+}
+
+/** 力度条纵向位置 → 力度值 0~1（顶部为满力度） */
+function laneValueAtY(y: number): number {
+  const canvas = velocityEl.value
+  const h = canvas?.clientHeight ?? LANE_H
+  return clamp(1 - (y - 2) / (h - 4), 0, 1)
+}
+
+/** 命中测试：找到力度条上 x 位置对应的音符（取柱子中心最近的一个） */
+function laneHitTest(x: number): Note | null {
+  const active = region.value
+  if (!active) return null
+  const px = state.view.pxPerBeat
+  let best: Note | null = null
+  let bestDist = Infinity
+  for (const note of active.notes) {
+    const barW = laneBarWidth(note)
+    const left = note.start * px
+    if (x >= left - 4 && x <= left + barW + 4) {
+      const dist = Math.abs(x - (left + barW / 2))
+      if (dist < bestDist) {
+        bestDist = dist
+        best = note
+      }
+    }
+  }
+  return best
+}
+
+/**
+ * 力度条拖拽状态：
+ * 记录抓取音符的原始力度与选中集合的原始力度，
+ * 拖动时以「相对抓取点的增量」整体平移，多选时保持相对强弱关系。
+ */
+const laneDrag: {
+  active: boolean
+  grabVelocity: number
+  base: Map<string, number>
+} = { active: false, grabVelocity: 0, base: new Map() }
+
+function applyLaneVelocity(y: number): void {
+  const value = laneValueAtY(y)
+  const delta = value - laneDrag.grabVelocity
+  const entries: { id: string; velocity: number }[] = []
+  for (const [id, base] of laneDrag.base) {
+    entries.push({ id, velocity: base + delta })
+  }
+  applyNoteVelocities(entries)
+  laneReadout.value = velocityToMidi(clamp(laneDrag.grabVelocity + delta, 0, 1))
+  requestDraw()
+}
+
+function onLanePointerDown(event: PointerEvent): void {
+  if (event.button !== 0) return
+  const { x, y } = laneLocal(event)
+  const hit = laneHitTest(x)
+  if (!hit) {
+    clearNoteSelection()
+    requestDraw()
+    return
+  }
+  if (!state.selectedNoteIds.includes(hit.id)) setNoteSelection([hit.id])
+
+  laneDrag.active = true
+  laneDrag.grabVelocity = hit.velocity
+  laneDrag.base.clear()
+  const ids = state.selectedNoteIds.length ? state.selectedNoteIds : [hit.id]
+  for (const id of ids) {
+    const note = region.value?.notes.find((n) => n.id === id)
+    if (note) laneDrag.base.set(id, note.velocity)
+  }
+  applyLaneVelocity(y)
+
+  window.addEventListener('pointermove', onLanePointerMove)
+  window.addEventListener('pointerup', onLanePointerUp)
+}
+
+function onLanePointerMove(event: PointerEvent): void {
+  if (!laneDrag.active) return
+  applyLaneVelocity(laneLocal(event).y)
+}
+
+function onLanePointerUp(): void {
+  if (!laneDrag.active) return
+  laneDrag.active = false
+  laneDrag.base.clear()
+  laneReadout.value = null
+  window.removeEventListener('pointermove', onLanePointerMove)
+  window.removeEventListener('pointerup', onLanePointerUp)
+  commit()
+  requestDraw()
+}
+
+// ---------------------------------------------------------------- 力度工具
+
+function onVelocityNudge(delta: number): void {
+  const count = nudgeTargetVelocity(delta)
+  state.statusText = count ? `力度调整：${count} 个音符` : '没有可调整的音符'
+  requestDraw()
+}
+
+function onVelocityScale(factor: number): void {
+  const count = scaleTargetVelocity(factor)
+  state.statusText = count ? `力度缩放 ×${factor}：${count} 个音符` : '没有可调整的音符'
+  requestDraw()
+}
+
+function onVelocityHumanize(): void {
+  const count = humanizeTargetVelocity(0.1)
+  state.statusText = count ? `已人性化 ${count} 个音符的力度` : '没有可调整的音符'
+  requestDraw()
+}
+
+function onVelocityUniform(): void {
+  const count = setTargetVelocity(midiToVelocity(100))
+  state.statusText = count ? `已把 ${count} 个音符力度统一为 100` : '没有可调整的音符'
+  requestDraw()
+}
+
 // ---------------------------------------------------------------- 重绘调度
 
 let rafId = 0
@@ -301,6 +505,7 @@ function loop(): void {
   if (dirty || state.isPlaying) {
     drawGrid()
     drawKeys()
+    if (state.velocityLaneOn) drawVelocity()
     dirty = false
   }
   rafId = requestAnimationFrame(loop)
@@ -608,6 +813,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   cancelAnimationFrame(rafId)
   detachListeners()
+  window.removeEventListener('pointermove', onLanePointerMove)
+  window.removeEventListener('pointerup', onLanePointerUp)
   resizeObserver?.disconnect()
 })
 
@@ -630,7 +837,9 @@ watch(
     state.playheadBeats,
     state.selectedNoteIds.length,
     state.activePitches.length,
-    state.project.timeSignature
+    state.project.timeSignature,
+    state.velocityLaneOn,
+    state.noteColorByVelocity
   ],
   () => requestDraw()
 )
@@ -649,11 +858,27 @@ watch(
       <label class="field">
         网格
         <select :value="state.snapDivision" @change="onGridChange">
-          <option :value="0.25">16 分音符</option>
-          <option :value="0.5">8 分音符</option>
+          <option :value="1">四分音符</option>
+          <option :value="0.5">八分音符</option>
+          <option :value="0.25">十六分音符</option>
+          <option :value="0.125">三十二分音符</option>
         </select>
       </label>
       <button title="把选中音符（未选中则整段）对齐到网格" @click="onQuantize">量化</button>
+      <button
+        :class="{ active: state.velocityLaneOn }"
+        title="展开 / 收起底部力度编辑条"
+        @click="toggleVelocityLane"
+      >
+        力度条
+      </button>
+      <button
+        :class="{ active: state.noteColorByVelocity }"
+        title="按力度给音符着色（冷色弱、暖色强）"
+        @click="toggleNoteColor"
+      >
+        力度着色
+      </button>
       <button
         :disabled="state.selectedNoteIds.length === 0"
         title="删除选中的音符（也可按 Delete 键）"
@@ -671,26 +896,67 @@ watch(
     </header>
 
     <div class="pr-main">
-      <!-- 左侧琴键列 -->
-      <div class="pr-keys" :style="{ width: KEY_WIDTH + 'px', paddingBottom: SCROLLBAR_SIZE + 'px' }">
-        <canvas ref="keysEl" class="keys-canvas" @pointerdown="onKeysPointerDown" />
+      <!-- 上：琴键列 + 音符网格 -->
+      <div class="pr-top">
+        <div class="pr-keys" :style="{ width: KEY_WIDTH + 'px', paddingBottom: SCROLLBAR_SIZE + 'px' }">
+          <canvas ref="keysEl" class="keys-canvas" @pointerdown="onKeysPointerDown" />
+        </div>
+
+        <div
+          ref="bodyEl"
+          class="pr-body"
+          @scroll="onScroll"
+          @wheel.prevent="onWheel"
+          @pointerdown="onPointerDown"
+          @contextmenu.prevent="onContextMenu"
+        >
+          <canvas
+            ref="gridEl"
+            class="grid-canvas"
+            :style="{ width: totalWidth + 'px', height: '100%' }"
+          />
+        </div>
       </div>
 
-      <!-- 右侧网格 -->
-      <div
-        ref="bodyEl"
-        class="pr-body"
-        @scroll="onScroll"
-        @wheel.prevent="onWheel"
-        @pointerdown="onPointerDown"
-        @contextmenu.prevent="onContextMenu"
-      >
-        <canvas
-          ref="gridEl"
-          class="grid-canvas"
-          :style="{ width: totalWidth + 'px', height: '100%' }"
-        />
-      </div>
+      <!-- 下：力度编辑条（可折叠） -->
+      <template v-if="state.velocityLaneOn">
+        <div class="pr-velbar">
+          <span class="lane-title">力度</span>
+          <button title="选中音符力度 -6（未选中则作用于整段）" @click="onVelocityNudge(-0.047)">−</button>
+          <button title="选中音符力度 +6" @click="onVelocityNudge(0.047)">＋</button>
+          <button title="力度 ×0.8" @click="onVelocityScale(0.8)">×0.8</button>
+          <button title="力度 ×1.25" @click="onVelocityScale(1.25)">×1.25</button>
+          <button title="在现有力度上随机抖动 ±10，避免机械感" @click="onVelocityHumanize">人性化</button>
+          <button title="把力度统一为 100（MIDI）" @click="onVelocityUniform">统一 100</button>
+          <span class="gap" />
+          <span class="lane-readout" :class="{ live: laneReadout !== null }">
+            {{
+              laneReadout !== null
+                ? `力度 ${laneReadout}`
+                : laneSelected
+                  ? '拖动柱子调整力度'
+                  : '未选中：作用于整段'
+            }}
+          </span>
+        </div>
+
+        <div class="pr-bottom" :style="{ height: LANE_H + 'px' }">
+          <div class="pr-lane-label" :style="{ width: KEY_WIDTH + 'px' }">力度</div>
+          <div class="pr-velocity" @wheel.prevent="onWheel">
+            <div
+              class="lane-inner"
+              :style="{ width: totalWidth + 'px', transform: `translateX(${-state.view.scrollLeft}px)` }"
+            >
+              <canvas
+                ref="velocityEl"
+                class="lane-canvas"
+                :style="{ width: totalWidth + 'px', height: '100%' }"
+                @pointerdown="onLanePointerDown"
+              />
+            </div>
+          </div>
+        </div>
+      </template>
     </div>
   </section>
 </template>
@@ -749,6 +1015,14 @@ watch(
 
 .pr-main {
   display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 上半部分：琴键列 + 音符网格 */
+.pr-top {
+  display: flex;
   flex: 1;
   min-height: 0;
 }
@@ -777,5 +1051,73 @@ watch(
 
 .grid-canvas {
   display: block;
+}
+
+/* 力度编辑条工具行 */
+.pr-velbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.lane-title {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.lane-readout {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.lane-readout.live {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 力度编辑条本体 */
+.pr-bottom {
+  display: flex;
+  flex: 0 0 auto;
+  border-top: 1px solid var(--line);
+  background: #14151a;
+}
+
+.pr-lane-label {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-right: 1px solid var(--line);
+}
+
+.pr-velocity {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.lane-inner {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  will-change: transform;
+}
+
+.lane-canvas {
+  display: block;
+  cursor: ns-resize;
 }
 </style>
