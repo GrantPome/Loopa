@@ -7,9 +7,13 @@
 import { computed } from 'vue'
 import { setLimiterThreshold, setMasterVolume, setReverbWet, state } from '@/core/store'
 import { LIMITER_MAX, LIMITER_MIN } from '@/types'
-import { gainToDbText } from '@/utils/audio'
+import { formatVolume } from '@/utils/audio'
 
-const masterDb = computed(() => gainToDbText(state.project.masterVolume))
+/** 总音量读数：随全局显示单位在 dB 与线性百分比之间切换 */
+const masterVolumeText = computed(() => formatVolume(state.project.masterVolume, state.volumeDisplay))
+const masterUnitTitle = computed(() =>
+  state.volumeDisplay === 'linear' ? '增益（线性 0~100%）' : '增益（dB）'
+)
 const wetPercent = computed(() => Math.round(state.project.reverbWet * 100))
 
 /** 电平 0~1 → 百分比宽度（开方让低电平也可见） */
@@ -47,10 +51,10 @@ function onLimiterInput(event: Event): void {
         max="1"
         step="0.01"
         :value="state.project.masterVolume"
-        title="总音量（显示为 dB）"
+        title="总音量（线性增益 0~1）"
         @input="onMasterInput"
       />
-      <span class="value" title="增益（dB）">{{ masterDb }}</span>
+      <span class="value" :title="masterUnitTitle">{{ masterVolumeText }}</span>
     </label>
 
     <label class="row">

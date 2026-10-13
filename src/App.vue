@@ -13,6 +13,7 @@ import MixerPanel from './components/MixerPanel.vue'
 import VirtualKeyboard from './components/VirtualKeyboard.vue'
 import MasterPanel from './components/MasterPanel.vue'
 import ProjectDialog from './components/ProjectDialog.vue'
+import SettingsDialog from './components/SettingsDialog.vue'
 import {
   clearNoteSelection,
   deleteSelectedNotes,
@@ -92,6 +93,7 @@ onBeforeUnmount(() => {
     </footer>
 
     <ProjectDialog :open="historyOpen" @close="historyOpen = false" />
+    <SettingsDialog v-if="state.settingsOpen" />
   </div>
 </template>
 

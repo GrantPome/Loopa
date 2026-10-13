@@ -17,11 +17,16 @@ import {
   toggleMute,
   toggleSolo
 } from '@/core/store'
-import { gainToDbText } from '@/utils/audio'
+import { formatVolume } from '@/utils/audio'
 
 const props = defineProps<{ track: Track; index: number }>()
 
 const selected = computed(() => state.selectedTrackId === props.track.id)
+/** 音量读数：随全局显示单位在 dB 与线性百分比之间切换 */
+const volumeText = computed(() => formatVolume(props.track.volume, state.volumeDisplay))
+const volumeUnitTitle = computed(() =>
+  state.volumeDisplay === 'linear' ? '增益（线性 0~100%）' : '增益（dB）'
+)
 const panText = computed(() => {
   const pan = props.track.pan
   if (Math.abs(pan) < 0.02) return 'C'
@@ -77,10 +82,10 @@ function onPanInput(event: Event): void {
         max="1"
         step="0.01"
         :value="track.volume"
-        title="音量推子（显示为 dB）"
+        title="音量推子（线性增益 0~1）"
         @input="onVolumeInput"
       />
-      <span class="value" title="增益（dB）">{{ gainToDbText(track.volume) }}</span>
+      <span class="value" :title="volumeUnitTitle">{{ volumeText }}</span>
     </div>
 
     <div class="line slider-line">

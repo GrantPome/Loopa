@@ -5,7 +5,7 @@
  * - 交互：点击新增、拖拽移动、拖两端改时长、右键/Delete 删除、框选、一键量化
  * - 只绘制视口内的行与音符，保证大量音符时依然流畅
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue'
 import type { GridDivision, Note } from '@/types'
 import { INSTRUMENT_LABELS } from '@/types'
 import {
@@ -15,14 +15,19 @@ import {
   applyNoteVelocities,
   clearNoteSelection,
   commit,
+  copySelectedNotes,
+  cutSelectedNotes,
   deleteSelectedNotes,
+  duplicateSelectedNotes,
   ensureBarsForBeat,
   humanizeTargetVelocity,
   nudgeTargetVelocity,
+  pasteNotes,
   previewAttack,
   quantizeSelected,
   removeNotes,
   scaleTargetVelocity,
+  selectAllNotes,
   setNoteSelection,
   setTargetVelocity,
   state,
@@ -47,6 +52,167 @@ const laneReadout = ref<number | null>(null)
 /** 力度编辑条是否有选中（用于高亮提示） */
 const laneSelected = computed(() => state.selectedNoteIds.length > 0)
 
+// ---------------------------------------------------------------- 长按 & 右键菜单
+// Pad 端没有键盘和右键，因此需要「长按」这一统一手势：
+//   · 长按空白处 → 进入框选模式（手指继续拖动选范围）
+//   · 长按选中音符 → 弹出右键菜单
+//   · 长按未选中音符 → 先选中再弹菜单
+// PC 端保留 Shift+拖拽框选 与 右键菜单，长按同样可用（方便触屏笔记本）。
+
+/** 长按时钟（ms），从 store 读取，Pad 模式下用户可调 */
+const longPressMs = computed(() => state.longPressDuration)
+/** 长按计时器 id，null 表示未在计时 */
+let longPressTimer: number | null = null
+/** 长按是否已经触发（触发后后续 move/up 走框选或菜单逻辑） */
+let longPressTriggered = false
+/** 长按起始时的指针坐标（画布本地坐标），用于判断是否移动过多 */
+let longPressOrigin = { x: 0, y: 0 }
+/** 长按起始时是否点中了音符（决定长按后是弹菜单还是进框选） */
+let longPressHitNote: Note | null = null
+/** 长按开始时已选中的音符 id 集合快照（用于恢复多选状态） */
+let longPressPrevSelection: string[] = []
+
+/** 右键 / 长按菜单 */
+const menuEl = ref<HTMLDivElement | null>(null)
+const menuVisible = ref(false)
+/** 菜单在视口中的坐标（clientX/clientY） */
+const menuPos = ref({ x: 0, y: 0 })
+/** 菜单弹出时，点击位置是否在某个音符上（决定菜单启用哪些项） */
+const menuHitNote = ref<Note | null>(null)
+
+function clearLongPressTimer(): void {
+  if (longPressTimer !== null) {
+    clearTimeout(longPressTimer)
+    longPressTimer = null
+  }
+}
+
+/** 启动长按计时器，超时后根据命中情况触发框选或弹出菜单 */
+function startLongPressTimer(x: number, y: number, hit: Note | null): void {
+  clearLongPressTimer()
+  longPressTriggered = false
+  longPressOrigin = { x, y }
+  longPressHitNote = hit
+  longPressPrevSelection = [...state.selectedNoteIds]
+  longPressTimer = window.setTimeout(() => {
+    longPressTriggered = true
+    longPressTimer = null
+    if (longPressHitNote) {
+      // 长按音符 → 弹出右键菜单
+      // 如果这个音符未被选中，先选中它（不清除其它选中项，方便多选操作）
+      const id = longPressHitNote.id
+      if (!state.selectedNoteIds.includes(id)) {
+        setNoteSelection([id])
+      }
+      openMenu(longPressOrigin.x, longPressOrigin.y, longPressHitNote)
+    } else {
+      // 长按空白 → 进入框选模式
+      drag.mode = 'marquee'
+      drag.marquee = { x0: longPressOrigin.x, y0: longPressOrigin.y, x1: longPressOrigin.x, y1: longPressOrigin.y }
+      clearNoteSelection()
+      requestDraw()
+    }
+  }, longPressMs.value)
+}
+
+/** 在视口指定位置打开右键菜单 */
+function openMenu(localX: number, localY: number, hitNote: Note | null): void {
+  const body = bodyEl.value
+  if (!body) return
+  const rect = body.getBoundingClientRect()
+  menuPos.value = {
+    x: rect.left + localX,
+    y: rect.top + localY
+  }
+  menuHitNote.value = hitNote
+  menuVisible.value = true
+  // 下一帧测量菜单尺寸，避免溢出视口
+  nextTick(() => clampMenuPosition())
+}
+
+function clampMenuPosition(): void {
+  const el = menuEl.value
+  if (!el) return
+  const w = el.offsetWidth
+  const h = el.offsetHeight
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  let { x, y } = menuPos.value
+  if (x + w > vw - 8) x = vw - w - 8
+  if (y + h > vh - 8) y = vh - h - 8
+  if (x < 8) x = 8
+  if (y < 8) y = 8
+  menuPos.value = { x, y }
+}
+
+function closeMenu(): void {
+  menuVisible.value = false
+  menuHitNote.value = null
+}
+
+// -------- 菜单操作 --------
+
+function menuCopy(): void {
+  copySelectedNotes()
+  closeMenu()
+}
+
+function menuCut(): void {
+  cutSelectedNotes()
+  closeMenu()
+}
+
+function menuPaste(): void {
+  pasteNotes()
+  closeMenu()
+}
+
+function menuDuplicate(): void {
+  duplicateSelectedNotes()
+  closeMenu()
+}
+
+function menuDelete(): void {
+  deleteSelectedNotes()
+  closeMenu()
+}
+
+function menuQuantize(): void {
+  quantizeSelected()
+  closeMenu()
+  requestDraw()
+}
+
+function menuSelectAll(): void {
+  selectAllNotes()
+  closeMenu()
+}
+
+function menuVelUp(): void {
+  nudgeTargetVelocity(0.047)
+  closeMenu()
+  requestDraw()
+}
+
+function menuVelDown(): void {
+  nudgeTargetVelocity(-0.047)
+  closeMenu()
+  requestDraw()
+}
+
+function menuVelHumanize(): void {
+  humanizeTargetVelocity(0.1)
+  closeMenu()
+  requestDraw()
+}
+
+/** 点击菜单外部关闭 */
+function onMenuOutsidePointerDown(event: PointerEvent): void {
+  if (!menuEl.value) return
+  if (menuEl.value.contains(event.target as Node)) return
+  closeMenu()
+}
+
 /** 视口顶部对应的 MIDI 音号（数值越大音越高，画布 y 越小） */
 const topMidi = ref(84)
 
@@ -58,7 +224,7 @@ const totalBeats = computed(() => state.project.bars * beatsPerBarOf(state.proje
 const totalWidth = computed(() => Math.max(200, totalBeats.value * state.view.pxPerBeat))
 const noteCount = computed(() => region.value?.notes.length ?? 0)
 
-type DragMode = 'none' | 'create' | 'move' | 'resize-end' | 'resize-start' | 'marquee'
+type DragMode = 'none' | 'create' | 'create-pending' | 'move' | 'move-pending' | 'resize-end' | 'resize-start' | 'marquee'
 
 interface NoteSnapshot {
   id: string
@@ -75,13 +241,16 @@ const drag: {
   originMidi: number
   moved: boolean
   marquee: { x0: number; y0: number; x1: number; y1: number } | null
+  /** move/resize pending 时的目标模式（长按计时结束前暂存） */
+  pendingTarget: DragMode
 } = {
   mode: 'none',
   snapshots: [],
   originBeat: 0,
   originMidi: 0,
   moved: false,
-  marquee: null
+  marquee: null,
+  pendingTarget: 'move'
 }
 
 // ---------------------------------------------------------------- 绘制工具
@@ -573,11 +742,15 @@ function detachListeners(): void {
 }
 
 function onPointerDown(event: PointerEvent): void {
+  // 左键（0）正常交互；右键（2）由 onContextMenu 单独处理
   if (event.button !== 0) return
   const { x, y } = localPoint(event)
   const beat = x / state.view.pxPerBeat
   const midi = midiAtY(y)
   const hit = hitTest(x, y)
+
+  // 先关掉菜单（如果开着）
+  closeMenu()
 
   if (hit) {
     const alreadySelected = state.selectedNoteIds.includes(hit.id)
@@ -587,10 +760,16 @@ function onPointerDown(event: PointerEvent): void {
     // 靠近两端 6px 视为改时长，其余区域为移动
     const noteX = hit.start * state.view.pxPerBeat
     const noteW = Math.max(3, hit.duration * state.view.pxPerBeat)
-    if (x - noteX <= 6) drag.mode = 'resize-start'
-    else if (noteX + noteW - x <= 6) drag.mode = 'resize-end'
-    else drag.mode = 'move'
+    let resizeMode: DragMode = 'move'
+    if (x - noteX <= 6) resizeMode = 'resize-start'
+    else if (noteX + noteW - x <= 6) resizeMode = 'resize-end'
 
+    // 启动长按计时：
+    //  - 按时长到 → 弹出右键菜单
+    //  - 移动超过阈值 → 取消计时，进入拖拽模式
+    startLongPressTimer(x, y, hit)
+    // 暂存目标模式，等长按取消后再真正进入
+    drag.mode = 'move-pending' as DragMode
     drag.snapshots = selectedNotes().map((n) => ({
       id: n.id,
       start: n.start,
@@ -599,23 +778,20 @@ function onPointerDown(event: PointerEvent): void {
     }))
     drag.originBeat = beat
     drag.originMidi = midi
+    drag.pendingTarget = resizeMode
   } else if (event.shiftKey) {
-    // Shift + 拖拽空白 = 框选
+    // Shift + 拖拽空白 = 框选（PC 端常用，Pad 端用长按）
     drag.mode = 'marquee'
     drag.marquee = { x0: x, y0: y, x1: x, y1: y }
     clearNoteSelection()
   } else {
-    // 空白处按下 = 新增音符
-    const start = Math.max(0, snapTo(beat, state.snapDivision))
-    const note = addNote(midi, start, state.snapDivision)
-    if (note) {
-      setNoteSelection([note.id])
-      drag.mode = 'create'
-      drag.snapshots = [{ id: note.id, start: note.start, duration: note.duration, midi: note.midi }]
-      drag.originBeat = note.start
-    } else {
-      drag.mode = 'none'
-    }
+    // 空白处按下：
+    //  - 先启动长按计时器（Pad 端长按 = 框选；PC 端也支持）
+    //  - 如果提前抬起（没到长按时长），则当作「新增音符」
+    startLongPressTimer(x, y, null)
+    drag.mode = 'create-pending'
+    drag.originBeat = Math.max(0, snapTo(beat, state.snapDivision))
+    drag.originMidi = midi
   }
 
   drag.moved = false
@@ -623,13 +799,62 @@ function onPointerDown(event: PointerEvent): void {
   requestDraw()
 }
 
+/**
+ * 右键菜单（PC 端）
+ * Pad 端通过长按触发菜单，走的是另一条路径。
+ */
+function onContextMenu(event: MouseEvent): void {
+  event.preventDefault()
+  const body = bodyEl.value
+  if (!body) return
+  const rect = body.getBoundingClientRect()
+  const x = event.clientX - rect.left + (body.scrollLeft ?? 0)
+  const y = event.clientY - rect.top
+  const hit = hitTest(x, y)
+  if (hit) {
+    // 右键点中音符 → 选中它（未选的话）并弹菜单
+    if (!state.selectedNoteIds.includes(hit.id)) setNoteSelection([hit.id])
+  } else {
+    // 右键空白 → 先清选中再弹菜单（方便粘贴等操作）
+    clearNoteSelection()
+  }
+  openMenu(x, y, hit)
+}
+
 function onPointerMove(event: PointerEvent): void {
-  if (drag.mode === 'none') {
+  const { x, y } = localPoint(event)
+
+  // 长按计时中：如果移动超过阈值，取消长按，当作普通拖拽
+  if (longPressTimer !== null) {
+    const dx = Math.abs(x - longPressOrigin.x)
+    const dy = Math.abs(y - longPressOrigin.y)
+    // 移动超过 6px 视为用户在拖拽，取消长按
+    if (dx > 6 || dy > 6) {
+      clearLongPressTimer()
+      // 如果是 create-pending（空白处按下后移动），转为「新增音符」模式
+      if (drag.mode === 'create-pending') {
+        const midi = drag.originMidi
+        const start = drag.originBeat
+        const note = addNote(midi, start, state.snapDivision)
+        if (note) {
+          setNoteSelection([note.id])
+          drag.mode = 'create'
+          drag.snapshots = [{ id: note.id, start: note.start, duration: note.duration, midi: note.midi }]
+        } else {
+          drag.mode = 'none'
+        }
+      } else if (drag.mode === 'move-pending') {
+        // 音符上按下后移动 → 进入拖拽模式
+        drag.mode = drag.pendingTarget
+      }
+    }
+  }
+
+  if (drag.mode === 'none' || drag.mode === 'create-pending' || drag.mode === 'move-pending') {
     updateCursor(event)
     return
   }
 
-  const { x, y } = localPoint(event)
   if (drag.mode === 'marquee' && drag.marquee) {
     drag.marquee.x1 = x
     drag.marquee.y1 = y
@@ -671,6 +896,49 @@ function onPointerMove(event: PointerEvent): void {
 }
 
 function onPointerUp(): void {
+  // 抬起时先清掉长按计时器
+  clearLongPressTimer()
+
+  // 如果是长按触发的菜单：抬起不做拖拽收尾，菜单自己处理
+  if (longPressTriggered && menuVisible.value) {
+    drag.mode = 'none'
+    drag.marquee = null
+    drag.snapshots = []
+    longPressTriggered = false
+    detachListeners()
+    requestDraw()
+    return
+  }
+
+  // create-pending 抬起 = 快速点击空白 → 新增一个默认时长的音符
+  if (drag.mode === 'create-pending') {
+    const midi = drag.originMidi
+    const start = drag.originBeat
+    const note = addNote(midi, start, state.snapDivision)
+    if (note) {
+      setNoteSelection([note.id])
+      commit()
+    }
+    drag.mode = 'none'
+    drag.marquee = null
+    drag.snapshots = []
+    longPressTriggered = false
+    detachListeners()
+    requestDraw()
+    return
+  }
+
+  // move-pending 抬起 = 点击（未拖拽）→ 选中状态已在 down 时处理，直接收尾
+  if (drag.mode === 'move-pending') {
+    drag.mode = 'none'
+    drag.marquee = null
+    drag.snapshots = []
+    longPressTriggered = false
+    detachListeners()
+    requestDraw()
+    return
+  }
+
   if (drag.mode === 'marquee' && drag.marquee) {
     const active = region.value
     if (active) {
@@ -702,6 +970,7 @@ function onPointerUp(): void {
     commit()
   }
 
+  longPressTriggered = false
   drag.mode = 'none'
   drag.marquee = null
   drag.snapshots = []
@@ -721,12 +990,6 @@ function updateCursor(event: PointerEvent): void {
   const noteX = hit.start * state.view.pxPerBeat
   const noteW = Math.max(3, hit.duration * state.view.pxPerBeat)
   body.style.cursor = x - noteX <= 6 || noteX + noteW - x <= 6 ? 'ew-resize' : 'grab'
-}
-
-function onContextMenu(event: MouseEvent): void {
-  const { x, y } = localPoint(event)
-  const hit = hitTest(x, y)
-  if (hit) removeNotes([hit.id])
 }
 
 // ---------------------------------------------------------------- 滚动与缩放
@@ -808,6 +1071,8 @@ onMounted(() => {
     resizeObserver = new ResizeObserver(() => requestDraw())
     resizeObserver.observe(host)
   }
+  // 点击菜单外部关闭菜单
+  window.addEventListener('pointerdown', onMenuOutsidePointerDown)
 })
 
 onBeforeUnmount(() => {
@@ -815,6 +1080,8 @@ onBeforeUnmount(() => {
   detachListeners()
   window.removeEventListener('pointermove', onLanePointerMove)
   window.removeEventListener('pointerup', onLanePointerUp)
+  window.removeEventListener('pointerdown', onMenuOutsidePointerDown)
+  clearLongPressTimer()
   resizeObserver?.disconnect()
 })
 
@@ -892,7 +1159,13 @@ watch(
 
       <button title="缩小" @click="zoomBy(1 / 1.3)">－</button>
       <button title="放大" @click="zoomBy(1.3)">＋</button>
-      <span class="dim hint">滚轮移动音高 · Shift+滚轮左右滚动 · Ctrl+滚轮缩放 · Shift+拖拽框选</span>
+      <span class="dim hint">
+        {{
+          state.deviceMode === 'pad'
+            ? '长按空白拖拽框选 · 长按音符弹菜单 · 双指缩放'
+            : '滚轮移动音高 · Shift+滚轮左右滚动 · Ctrl+滚轮缩放 · Shift+拖拽框选 · 右键菜单'
+        }}
+      </span>
     </header>
 
     <div class="pr-main">
@@ -957,6 +1230,40 @@ watch(
           </div>
         </div>
       </template>
+    </div>
+
+    <!-- 右键 / 长按菜单 -->
+    <div
+      v-if="menuVisible"
+      ref="menuEl"
+      class="ctx-menu"
+      :style="{ left: menuPos.x + 'px', top: menuPos.y + 'px' }"
+      @pointerdown.stop
+    >
+      <div class="ctx-title">
+        {{ menuHitNote ? '音符操作' : '编辑' }}
+        <span class="ctx-count" v-if="state.selectedNoteIds.length > 0">
+          已选 {{ state.selectedNoteIds.length }}
+        </span>
+      </div>
+      <button class="ctx-item" @click="menuSelectAll">全选</button>
+      <div class="ctx-sep" />
+      <button class="ctx-item" @click="menuCopy">复制</button>
+      <button class="ctx-item" @click="menuCut">剪切</button>
+      <button class="ctx-item" @click="menuPaste">粘贴</button>
+      <button class="ctx-item" @click="menuDuplicate">再制</button>
+      <div class="ctx-sep" />
+      <button class="ctx-item" :disabled="state.selectedNoteIds.length === 0" @click="menuDelete">
+        删除
+      </button>
+      <button class="ctx-item" :disabled="state.selectedNoteIds.length === 0" @click="menuQuantize">
+        量化
+      </button>
+      <div class="ctx-sep" />
+      <div class="ctx-sub">力度</div>
+      <button class="ctx-item" @click="menuVelUp">力度 +6</button>
+      <button class="ctx-item" @click="menuVelDown">力度 −6</button>
+      <button class="ctx-item" @click="menuVelHumanize">人性化</button>
     </div>
   </section>
 </template>
@@ -1119,5 +1426,70 @@ watch(
 .lane-canvas {
   display: block;
   cursor: ns-resize;
+}
+
+/* 右键 / 长按菜单 */
+.ctx-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 156px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ctx-title {
+  padding: 6px 10px 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ctx-count {
+  font-size: 10px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.ctx-item {
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.ctx-item:hover:not(:disabled) {
+  background: var(--panel-3);
+}
+
+.ctx-item:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.ctx-sep {
+  height: 1px;
+  background: var(--line);
+  margin: 3px 4px;
+}
+
+.ctx-sub {
+  padding: 4px 10px 2px;
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 </style>

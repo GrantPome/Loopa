@@ -64,6 +64,22 @@ export interface Region {
 /** 均衡器频段标识（与 Track 上的字段名一一对应） */
 export type EqBand = 'eqLow' | 'eqMid' | 'eqHigh'
 
+/**
+ * 音量读数的显示单位：
+ * - db：对数刻度（专业 DAW 常见，如 -1.9）
+ * - linear：线性刻度（0~100%），直观反映增益比例
+ * 底层存储始终是线性增益，这里只影响界面如何呈现。
+ */
+export type VolumeDisplay = 'db' | 'linear'
+
+/**
+ * UI 适配的设备模式：
+ * - pc：桌面端，鼠标 + 键盘，交互精确，信息密度高
+ * - pad：平板端，触控优先，控件放大，虚拟键盘常驻，用长按替代右键
+ * 用户可手动切换，方便在触屏 PC 或带键盘的平板上自由选择。
+ */
+export type DeviceMode = 'pc' | 'pad'
+
 /** 一条乐器轨道 */
 export interface Track {
   id: string

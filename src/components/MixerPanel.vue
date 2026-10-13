@@ -7,7 +7,7 @@
 import { computed } from 'vue'
 import type { Track } from '@/types'
 import { EQ_BANDS, EQ_MAX, EQ_MIN, LIMITER_MAX, LIMITER_MIN } from '@/types'
-import { gainToDbText } from '@/utils/audio'
+import { formatVolume } from '@/utils/audio'
 import {
   resetTrackMix,
   selectTrack,
@@ -94,7 +94,7 @@ const panText = (pan: number): string => {
               @input="onVolumeInput(track, $event)"
             />
           </div>
-          <div class="db">{{ gainToDbText(track.volume) }}</div>
+          <div class="db">{{ formatVolume(track.volume, state.volumeDisplay) }}</div>
         </div>
 
         <!-- 声像 -->
@@ -188,7 +188,7 @@ const panText = (pan: number): string => {
             @input="onMasterInput"
           />
         </div>
-        <div class="db">{{ gainToDbText(state.project.masterVolume) }}</div>
+        <div class="db">{{ formatVolume(state.project.masterVolume, state.volumeDisplay) }}</div>
       </div>
 
       <div class="led-row">

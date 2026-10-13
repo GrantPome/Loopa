@@ -5,7 +5,7 @@
 import { computed, ref } from 'vue'
 import type { InstrumentType } from '@/types'
 import { INSTRUMENT_OPTIONS } from '@/types'
-import { addTrack, state } from '@/core/store'
+import { addTrack, state, toggleVolumeDisplay } from '@/core/store'
 import TrackRow from './TrackRow.vue'
 
 const newInstrument = ref<InstrumentType>('piano')
@@ -22,6 +22,18 @@ const noteCount = computed(() =>
   <aside class="track-panel">
     <div class="head">
       <span class="title">轨道</span>
+      <button
+        class="unit"
+        :class="{ active: state.volumeDisplay === 'linear' }"
+        :title="
+          state.volumeDisplay === 'linear'
+            ? '音量读数：线性百分比，点击切回 dB'
+            : '音量读数：dB，点击切换为线性百分比'
+        "
+        @click="toggleVolumeDisplay"
+      >
+        {{ state.volumeDisplay === 'linear' ? '线性' : 'dB' }}
+      </button>
       <span class="spacer" />
       <select v-model="newInstrument" class="inst" title="选择要新增的音色">
         <option v-for="option in INSTRUMENT_OPTIONS" :key="option.value" :value="option.value">
@@ -69,6 +81,16 @@ const noteCount = computed(() =>
 
 .title {
   font-weight: 600;
+}
+
+.unit {
+  padding: 2px 7px;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.unit:not(.active) {
+  color: var(--text-dim);
 }
 
 .spacer {

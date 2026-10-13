@@ -11,6 +11,7 @@ import {
   exportProjectJson,
   importProjectJson,
   exportWav,
+  openSettings,
   renameProject,
   setBpm,
   setTimeSignature,
@@ -79,6 +80,7 @@ async function onFileChange(event: Event): Promise<void> {
       <button :disabled="state.busy" title="离线渲染并下载 WAV" @click="exportWav">
         {{ state.busy ? '渲染中…' : '导出 WAV' }}
       </button>
+      <button title="设置" @click="openSettings">⚙</button>
       <input
         ref="fileInput"
         type="file"

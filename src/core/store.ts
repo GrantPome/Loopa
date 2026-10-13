@@ -7,9 +7,11 @@ import type {
   Project,
   ProjectMeta,
   Region,
+  DeviceMode,
   TimeSignature,
   Track,
-  ViewMode
+  ViewMode,
+  VolumeDisplay
 } from '@/types'
 import { EQ_MAX, EQ_MIN, INSTRUMENT_LABELS, LIMITER_MAX, LIMITER_MIN, TRACK_COLORS, VELOCITY_MAX, VELOCITY_MIN } from '@/types'
 import { MAX_MIDI, MIN_MIDI, beatsPerBarOf, clamp, roundBeat, snapTo, uid } from '@/utils/music'
@@ -61,6 +63,16 @@ export interface AppState {
   noteColorByVelocity: boolean
   /** 虚拟键盘 / 试听的力度 0~1 */
   keyboardVelocity: number
+  /** 音量读数显示单位：dB 或线性（仅影响界面呈现，不改动底层增益） */
+  volumeDisplay: VolumeDisplay
+  /** 当前 UI 适配的设备模式（pc / pad），用户可手动切换 */
+  deviceMode: DeviceMode
+  /** 设置对话框是否打开 */
+  settingsOpen: boolean
+  /** Pad 端长按触发时间（ms）：超过该时长即视为长按，用于启动框选或弹出右键菜单 */
+  longPressDuration: number
+  /** Pad 端是否在底部常驻显示虚拟键盘（PC 端默认折叠） */
+  touchKeyboardAlwaysOn: boolean
   /** 各轨道实时电平 0~1（键为轨道 id） */
   levels: Record<string, number>
   /** 总线输出电平 0~1 */
@@ -187,6 +199,11 @@ export const state = reactive<AppState>({
   velocityLaneOn: true,
   noteColorByVelocity: false,
   keyboardVelocity: 0.85,
+  volumeDisplay: 'db',
+  deviceMode: 'pc',
+  settingsOpen: false,
+  longPressDuration: 450,
+  touchKeyboardAlwaysOn: true,
   levels: {},
   masterLevel: 0,
   limiting: false,
@@ -514,6 +531,14 @@ export function clearNoteSelection(): void {
   state.selectedNoteIds = []
 }
 
+/** 全选当前片段中的所有音符 */
+export function selectAllNotes(): number {
+  const region = activeRegion()
+  if (!region) return 0
+  state.selectedNoteIds = region.notes.map((n) => n.id)
+  return state.selectedNoteIds.length
+}
+
 // ------------------------------------------------------------ 力度编辑
 
 /**
@@ -738,6 +763,38 @@ export function toggleNoteColor(): void {
 /** 设置虚拟键盘 / 试听力度（0~1） */
 export function setKeyboardVelocity(velocity: number): void {
   state.keyboardVelocity = clamp(velocity, VELOCITY_MIN, VELOCITY_MAX)
+}
+
+/** 切换音量读数单位：dB ↔ 线性百分比（全局生效，仅影响显示） */
+export function toggleVolumeDisplay(): void {
+  state.volumeDisplay = state.volumeDisplay === 'db' ? 'linear' : 'db'
+}
+
+/** 切换设备模式（pc / pad），切换后整体布局与交互方式都会调整 */
+export function setDeviceMode(mode: DeviceMode): void {
+  state.deviceMode = mode
+  // Pad 模式下自动加大行高，方便手指点击
+  if (mode === 'pad' && state.view.rowHeight < 20) state.view.rowHeight = 22
+}
+
+/** 打开设置对话框 */
+export function openSettings(): void {
+  state.settingsOpen = true
+}
+
+/** 关闭设置对话框 */
+export function closeSettings(): void {
+  state.settingsOpen = false
+}
+
+/** 设置长按触发时长（ms），仅在 Pad 模式下用于框选和右键菜单 */
+export function setLongPressDuration(ms: number): void {
+  state.longPressDuration = Math.max(150, Math.min(2000, ms))
+}
+
+/** 切换 Pad 端虚拟键盘是否常驻显示 */
+export function toggleTouchKeyboardAlwaysOn(): void {
+  state.touchKeyboardAlwaysOn = !state.touchKeyboardAlwaysOn
 }
 
 export function toggleMetronome(): void {
