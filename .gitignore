@@ -1,0 +1,21 @@
+# 依赖
+node_modules
+
+# 构建产物
+dist
+dist-ssr
+
+# Trae 生成的分享包，与源码无关
+.trae-html-share-packages
+
+# 本地环境与缓存
+*.local
+*.log
+npm-debug.log*
+.vite
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store

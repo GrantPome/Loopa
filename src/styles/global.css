@@ -1,0 +1,126 @@
+/* 全局基础样式：暗色简约风格，参考库乐队的低饱和配色 */
+:root {
+  --bg: #16171b;
+  --panel: #1e2026;
+  --panel-2: #24262d;
+  --panel-3: #2b2e36;
+  --line: #333744;
+  --text: #dfe2ea;
+  --text-dim: #868b9c;
+  --accent: #4f9df7;
+  --accent-2: #ff4d6d;
+  --ok: #63c78d;
+  --radius: 6px;
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--panel-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, opacity 0.16s ease;
+}
+
+button:hover:not(:disabled) {
+  background: #343843;
+  border-color: #4a4f60;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0d1117;
+  font-weight: 600;
+}
+
+input,
+select {
+  font: inherit;
+  color: inherit;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 3px 6px;
+  outline: none;
+}
+
+input:focus,
+select:focus {
+  border-color: var(--accent);
+}
+
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  height: 16px;
+  cursor: pointer;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: #3a3e4a;
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+}
+
+/* 细滚动条，避免滚动条宽度差异导致时间总轨与钢琴卷帘错位 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1b20;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3c4050;
+  border-radius: 5px;
+  border: 2px solid #1a1b20;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4d5266;
+}
