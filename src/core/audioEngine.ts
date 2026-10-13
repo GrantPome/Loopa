@@ -1,5 +1,5 @@
 import * as Tone from 'tone'
-import type { Project, Track, TimeSignature } from '@/types'
+import type { EqBand, Project, Track, TimeSignature } from '@/types'
 import { beatsPerBarOf, beatsToTransportTime, midiToNoteName } from '@/utils/music'
 import { createInstrument, isDrumTrack, type InstrumentNode } from './instruments'
 
@@ -15,13 +15,28 @@ export function computeTrackGain(track: Track, tracks: Track[]): number {
   return track.volume
 }
 
-/** 一条轨道对应的音频通道：乐器 -> 声像 -> 增益 -> 主输出 */
+/**
+ * 一条轨道对应的音频通道：
+ * 乐器 → 均衡 → 声像 → 推子 → 主干声总线
+ *                          ↘ 混响发送 → 共享混响总线
+ *                          ↘ 电平表（旁路分析，不影响声音）
+ */
 interface Channel {
   id: string
   instrument: Track['instrument']
   node: InstrumentNode
+  eq: Tone.EQ3
   panner: Tone.Panner
   gain: Tone.Gain
+  send: Tone.Gain
+  meter: Tone.Meter
+}
+
+/** 数据字段名 → EQ3 属性名的映射 */
+const EQ3_KEYS: Record<EqBand, 'low' | 'mid' | 'high'> = {
+  eqLow: 'low',
+  eqMid: 'mid',
+  eqHigh: 'high'
 }
 
 /**
@@ -31,6 +46,7 @@ interface Channel {
  * - 所有音乐调度都交给 Tone.Transport，绝不使用 setTimeout 计时
  * - 音频上下文必须由用户手势触发 Tone.start() 后才可用
  * - 音符排期使用 "小节:拍:十六分" 相对时间，BPM 改变时自动重新缩放
+ * - 混音总线：所有轨道汇入干声总线 + 共享混响总线，最后经限幅器输出
  */
 class AudioEngine {
   /** 音频上下文是否已激活 */
@@ -38,8 +54,19 @@ class AudioEngine {
   /** 主输出链路是否已构建 */
   private graphReady = false
 
+  /** 干声汇总总线（所有轨道推子后信号） */
+  private dryBus!: Tone.Gain
+  /** 共享混响总线（各轨发送量汇总后进入混响） */
+  private reverbBus!: Tone.Freeverb
+  /** 混响返回电平（决定混响在总输出中的占比） */
+  private reverbReturn!: Tone.Gain
+  /** 总音量推子 */
   private masterGain!: Tone.Gain
-  private reverb!: Tone.Freeverb
+  /** 总线限幅器，防止总输出削波 */
+  private limiter!: Tone.Limiter
+  /** 总线电平表 */
+  private masterMeter!: Tone.Meter
+
   private clickGain!: Tone.Gain
   private clickHi!: Tone.Synth
   private clickLo!: Tone.Synth
@@ -80,14 +107,25 @@ class AudioEngine {
   private buildGraph(): void {
     if (this.graphReady) return
 
-    // 主输出：Gain -> Freeverb -> Destination
-    // 用 Freeverb（算法混响）而不是 Reverb，避免 IR 生成的异步问题，离线导出也能复用
+    // 主输出：干声总线 + 混响总线 → 总音量 → 限幅器 → 扬声器
+    this.dryBus = new Tone.Gain(1)
+    this.reverbBus = new Tone.Freeverb({ roomSize: 0.72, dampening: 2600, wet: 1 })
+    this.reverbReturn = new Tone.Gain(0.18)
     this.masterGain = new Tone.Gain(0.8)
-    this.reverb = new Tone.Freeverb({ roomSize: 0.72, dampening: 2600, wet: 0.18 })
-    this.masterGain.connect(this.reverb)
-    this.reverb.toDestination()
+    // 限幅器阈值 -1dB，既能防止削波又几乎听不出压缩痕迹
+    this.limiter = new Tone.Limiter(-1)
 
-    // 节拍器独立于主输出，避免被主音量推子影响
+    this.dryBus.connect(this.masterGain)
+    this.reverbBus.connect(this.reverbReturn)
+    this.reverbReturn.connect(this.masterGain)
+    this.masterGain.connect(this.limiter)
+    this.limiter.toDestination()
+
+    // 总线电平表挂在限幅之后，反映最终输出电平
+    this.masterMeter = new Tone.Meter({ normalRange: true, smoothing: 0.85 })
+    this.limiter.connect(this.masterMeter)
+
+    // 节拍器独立于主输出，避免被总音量推子影响
     this.clickGain = new Tone.Gain(0.6).toDestination()
     this.clickHi = new Tone.Synth({
       oscillator: { type: 'square' },
@@ -130,18 +168,38 @@ class AudioEngine {
         channel = undefined
       }
       if (!channel) {
-        const gain = new Tone.Gain(1).connect(this.masterGain)
-        const panner = new Tone.Panner(track.pan).connect(gain)
-        const node = createInstrument(track.instrument)
-        node.connect(panner)
-        channel = { id: track.id, instrument: track.instrument, node, panner, gain }
+        channel = this.createChannel(track)
         this.channels.set(track.id, channel)
       }
       this.applyMix(channel, track, project.tracks)
     }
   }
 
-  /** 实时更新单条轨道的音量/声像/静音（不需要重排音符） */
+  /** 建立单条轨道的完整信号链 */
+  private createChannel(track: Track): Channel {
+    const gain = new Tone.Gain(1)
+    gain.connect(this.dryBus)
+
+    const send = new Tone.Gain(track.reverbSend)
+    gain.connect(send)
+    send.connect(this.reverbBus)
+
+    const panner = new Tone.Panner(track.pan)
+    panner.connect(gain)
+
+    const eq = new Tone.EQ3({ low: track.eqLow, mid: track.eqMid, high: track.eqHigh })
+    eq.connect(panner)
+
+    const meter = new Tone.Meter({ normalRange: true, smoothing: 0.85 })
+    gain.connect(meter)
+
+    const node = createInstrument(track.instrument)
+    node.connect(eq)
+
+    return { id: track.id, instrument: track.instrument, node, eq, panner, gain, send, meter }
+  }
+
+  /** 实时更新单条轨道的音量/声像/均衡/发送（不需要重排音符） */
   updateMix(track: Track, tracks: Track[]): void {
     const channel = this.channels.get(track.id)
     if (!channel) return
@@ -159,12 +217,55 @@ class AudioEngine {
   private applyMix(channel: Channel, track: Track, tracks: Track[]): void {
     channel.gain.gain.value = computeTrackGain(track, tracks)
     channel.panner.pan.value = track.pan
+    channel.eq.low.value = track.eqLow
+    channel.eq.mid.value = track.eqMid
+    channel.eq.high.value = track.eqHigh
+    channel.send.gain.value = track.reverbSend
+  }
+
+  /** 单独设置某个均衡频段（供 UI 拖动时即时反馈） */
+  setTrackEq(trackId: string, band: EqBand, value: number): void {
+    const channel = this.channels.get(trackId)
+    if (!channel) return
+    // EqBand 用的是数据字段名，EQ3 用的是 low/mid/high，这里做一次映射
+    channel.eq[EQ3_KEYS[band]].value = value
+  }
+
+  /** 单独设置混响发送量 */
+  setTrackReverbSend(trackId: string, value: number): void {
+    const channel = this.channels.get(trackId)
+    if (!channel) return
+    channel.send.gain.value = value
   }
 
   private disposeChannel(channel: Channel): void {
     channel.node.dispose()
+    channel.eq.dispose()
     channel.panner.dispose()
     channel.gain.dispose()
+    channel.send.dispose()
+    channel.meter.dispose()
+  }
+
+  // ------------------------------------------------------------ 电平表
+
+  /** 读取某条轨道的电平（0~1，未就绪或未找到时返回 0） */
+  getTrackLevel(trackId: string): number {
+    const channel = this.channels.get(trackId)
+    if (!channel) return 0
+    return readMeter(channel.meter)
+  }
+
+  /** 读取总线输出电平（0~1） */
+  getMasterLevel(): number {
+    if (!this.graphReady) return 0
+    return readMeter(this.masterMeter)
+  }
+
+  /** 限幅器是否正在工作（增益衰减超过 0.5dB 视为触发） */
+  isLimiting(): boolean {
+    if (!this.graphReady) return false
+    return this.limiter.reduction < -0.5
   }
 
   // ---------------------------------------------------------------- 排期
@@ -219,16 +320,22 @@ class AudioEngine {
     this.transport.bpm.value = bpm
   }
 
-  /** 主输出音量（0~1） */
+  /** 总输出音量（0~1） */
   setMasterVolume(volume: number): void {
     if (!this.graphReady) return
     this.masterGain.gain.value = volume
   }
 
-  /** 主输出混响湿度（0~1） */
+  /** 混响返回量（0~1） */
   setReverbWet(wet: number): void {
     if (!this.graphReady) return
-    this.reverb.wet.value = wet
+    this.reverbReturn.gain.value = wet
+  }
+
+  /** 总线限幅阈值（dB） */
+  setLimiterThreshold(db: number): void {
+    if (!this.graphReady) return
+    this.limiter.threshold.value = db
   }
 
   setTimeSignature(ts: TimeSignature): void {
@@ -348,6 +455,7 @@ class AudioEngine {
    * 用 Tone.Offline 离线渲染整个工程，返回 AudioBuffer。
    * 注意：Tone.Offline 执行期间全局上下文会临时切换到离线上下文，
    * 回调里拿到的 transport 属于该离线上下文，因此节点与排期都在回调内创建。
+   * 这里的信号链与实时播放保持一致（均衡 → 声像 → 推子 → 干声/混响总线 → 限幅）。
    */
   async renderToAudioBuffer(project: Project): Promise<AudioBuffer> {
     const bpb = beatsPerBarOf(project.timeSignature)
@@ -357,18 +465,35 @@ class AudioEngine {
     const duration = totalBeats * secondsPerBeat + 2
 
     const rendered = await Tone.Offline(({ transport }) => {
-      // 与实时播放一致的主输出链路
+      const dryBus = new Tone.Gain(1)
+      const reverbBus = new Tone.Freeverb({ roomSize: 0.72, dampening: 2600, wet: 1 })
+      const reverbReturn = new Tone.Gain(project.reverbWet)
       const master = new Tone.Gain(project.masterVolume)
-      const reverb = new Tone.Freeverb({ roomSize: 0.72, dampening: 2600, wet: project.reverbWet })
-      master.connect(reverb)
-      reverb.toDestination()
+      const limiter = new Tone.Limiter(project.masterLimiter)
+
+      dryBus.connect(master)
+      reverbBus.connect(reverbReturn)
+      reverbReturn.connect(master)
+      master.connect(limiter)
+      limiter.toDestination()
 
       const nodes = new Map<string, InstrumentNode>()
       for (const track of project.tracks) {
-        const gain = new Tone.Gain(computeTrackGain(track, project.tracks)).connect(master)
-        const panner = new Tone.Panner(track.pan).connect(gain)
+        const gain = new Tone.Gain(computeTrackGain(track, project.tracks))
+        gain.connect(dryBus)
+
+        const send = new Tone.Gain(track.reverbSend)
+        gain.connect(send)
+        send.connect(reverbBus)
+
+        const panner = new Tone.Panner(track.pan)
+        panner.connect(gain)
+
+        const eq = new Tone.EQ3({ low: track.eqLow, mid: track.eqMid, high: track.eqHigh })
+        eq.connect(panner)
+
         const node = createInstrument(track.instrument)
-        node.connect(panner)
+        node.connect(eq)
         nodes.set(track.id, node)
       }
 
@@ -397,6 +522,15 @@ class AudioEngine {
     if (!audioBuffer) throw new Error('离线渲染失败：未得到音频数据')
     return audioBuffer
   }
+}
+
+/** 读取电平表数值并归一化到 0~1（normalRange 模式下已是 0~1，这里再做一次保护） */
+function readMeter(meter: Tone.Meter): number {
+  const raw = meter.getValue()
+  const value = Array.isArray(raw) ? raw[0] : raw
+  if (!Number.isFinite(value)) return 0
+  // normalRange: true 时 value 已经是 0~1；若被平滑成极小值则视为静音
+  return Math.max(0, Math.min(1, value))
 }
 
 let engineInstance: AudioEngine | null = null

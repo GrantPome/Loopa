@@ -8,10 +8,11 @@ import TopToolbar from './components/TopToolbar.vue'
 import TrackList from './components/TrackList.vue'
 import TimelineRuler from './components/TimelineRuler.vue'
 import PianoRoll from './components/PianoRoll.vue'
+import MixerPanel from './components/MixerPanel.vue'
 import VirtualKeyboard from './components/VirtualKeyboard.vue'
 import MasterPanel from './components/MasterPanel.vue'
 import ProjectDialog from './components/ProjectDialog.vue'
-import { clearNoteSelection, deleteSelectedNotes, ensureAudio, togglePlay } from './core/store'
+import { clearNoteSelection, deleteSelectedNotes, ensureAudio, state, togglePlay } from './core/store'
 
 const historyOpen = ref(false)
 
@@ -58,8 +59,12 @@ onBeforeUnmount(() => {
     <div class="main">
       <TrackList />
       <div class="editor">
-        <TimelineRuler />
-        <PianoRoll />
+        <!-- 中央编辑区：钢琴卷帘（含时间总轨）或混音台 -->
+        <template v-if="state.viewMode === 'piano'">
+          <TimelineRuler />
+          <PianoRoll />
+        </template>
+        <MixerPanel v-else />
       </div>
     </div>
 

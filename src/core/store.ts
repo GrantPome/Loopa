@@ -1,5 +1,6 @@
 import { reactive } from 'vue'
 import type {
+  EqBand,
   GridDivision,
   InstrumentType,
   Note,
@@ -7,15 +8,26 @@ import type {
   ProjectMeta,
   Region,
   TimeSignature,
-  Track
+  Track,
+  ViewMode
 } from '@/types'
-import { INSTRUMENT_LABELS, TRACK_COLORS } from '@/types'
+import { EQ_MAX, EQ_MIN, INSTRUMENT_LABELS, LIMITER_MAX, LIMITER_MIN, TRACK_COLORS } from '@/types'
 import { beatsPerBarOf, clamp, roundBeat, snapTo, uid } from '@/utils/music'
 import { audioBufferToWavBlob, downloadBlob } from '@/utils/wav'
 import { getAudioEngine } from './audioEngine'
 import * as storage from './persistence'
 
 const engine = getAudioEngine()
+
+/** 新轨道的默认混音参数 */
+const DEFAULT_MIX = {
+  volume: 0.8,
+  pan: 0,
+  eqLow: 0,
+  eqMid: 0,
+  eqHigh: 0,
+  reverbSend: 0.2
+}
 
 /** 视图状态（钢琴卷帘与时间总轨共享，保证两处刻度对齐） */
 export interface ViewState {
@@ -41,6 +53,14 @@ export interface AppState {
   loopOn: boolean
   /** 虚拟键盘高亮的音高 */
   activePitches: number[]
+  /** 中央编辑区当前展示的视图 */
+  viewMode: ViewMode
+  /** 各轨道实时电平 0~1（键为轨道 id） */
+  levels: Record<string, number>
+  /** 总线输出电平 0~1 */
+  masterLevel: number
+  /** 限幅器是否正在压制信号 */
+  limiting: boolean
   view: ViewState
   /** 工程数据版本号：任何改动 +1，用于触发重绘与音频重排 */
   revision: number
@@ -61,6 +81,7 @@ export function createEmptyProject(name = '未命名工程'): Project {
     timeSignature: '4/4',
     masterVolume: 0.8,
     reverbWet: 0.18,
+    masterLimiter: -1,
     bars: 8,
     tracks: [],
     createdAt: now,
@@ -83,12 +104,62 @@ export function createTrack(project: Project, instrument: InstrumentType, index:
     id: uid('trk'),
     name: `${INSTRUMENT_LABELS[instrument]} ${index + 1}`,
     instrument,
-    volume: 0.8,
-    pan: 0,
+    ...DEFAULT_MIX,
     mute: false,
     solo: false,
     color: TRACK_COLORS[index % TRACK_COLORS.length],
     regions: [makeRegion(project)]
+  }
+}
+
+/**
+ * 补齐工程里可能缺失的字段（兼容旧版本 localStorage 数据与手工编辑过的 JSON）。
+ * 音频引擎与 UI 都假设这些字段一定存在，因此在入口处统一做一次归一化。
+ */
+function normalizeTrack(raw: Partial<Track>, index: number): Track {
+  return {
+    id: raw.id ?? uid('trk'),
+    name: raw.name ?? `轨道 ${index + 1}`,
+    instrument: (raw.instrument ?? 'piano') as InstrumentType,
+    volume: clamp(raw.volume ?? DEFAULT_MIX.volume, 0, 1),
+    pan: clamp(raw.pan ?? DEFAULT_MIX.pan, -1, 1),
+    eqLow: clamp(raw.eqLow ?? DEFAULT_MIX.eqLow, EQ_MIN, EQ_MAX),
+    eqMid: clamp(raw.eqMid ?? DEFAULT_MIX.eqMid, EQ_MIN, EQ_MAX),
+    eqHigh: clamp(raw.eqHigh ?? DEFAULT_MIX.eqHigh, EQ_MIN, EQ_MAX),
+    reverbSend: clamp(raw.reverbSend ?? DEFAULT_MIX.reverbSend, 0, 1),
+    mute: Boolean(raw.mute),
+    solo: Boolean(raw.solo),
+    color: raw.color ?? TRACK_COLORS[index % TRACK_COLORS.length],
+    regions: (raw.regions ?? []).map((r) => ({
+      id: r.id ?? uid('rgn'),
+      name: r.name ?? '片段',
+      start: r.start ?? 0,
+      length: r.length ?? 0,
+      notes: (r.notes ?? []).map((n) => ({
+        id: n.id ?? uid('note'),
+        midi: n.midi ?? 60,
+        start: n.start ?? 0,
+        duration: n.duration ?? 0.25,
+        velocity: n.velocity ?? 0.85
+      }))
+    }))
+  }
+}
+
+export function normalizeProject(raw: Partial<Project>, fallbackName = '未命名工程'): Project {
+  const base = createEmptyProject(raw.name ?? fallbackName)
+  return {
+    ...base,
+    ...raw,
+    bpm: clamp(raw.bpm ?? base.bpm, 40, 200),
+    timeSignature: (raw.timeSignature ?? base.timeSignature) as TimeSignature,
+    masterVolume: clamp(raw.masterVolume ?? base.masterVolume, 0, 1),
+    reverbWet: clamp(raw.reverbWet ?? base.reverbWet, 0, 1),
+    masterLimiter: clamp(raw.masterLimiter ?? base.masterLimiter, LIMITER_MIN, LIMITER_MAX),
+    bars: raw.bars ?? base.bars,
+    tracks: (raw.tracks ?? []).map((t, i) => normalizeTrack(t, i)),
+    createdAt: raw.createdAt ?? base.createdAt,
+    updatedAt: raw.updatedAt ?? base.updatedAt
   }
 }
 
@@ -106,6 +177,10 @@ export const state = reactive<AppState>({
   countInOn: true,
   loopOn: true,
   activePitches: [],
+  viewMode: 'piano',
+  levels: {},
+  masterLevel: 0,
+  limiting: false,
   view: { pxPerBeat: 64, scrollLeft: 0, rowHeight: 16 },
   revision: 0,
   savedProjects: [],
@@ -122,7 +197,7 @@ export function initStore(): void {
   const lastId = storage.readLastProjectId()
   const loaded = lastId ? storage.loadProject(lastId) : null
   if (loaded) {
-    state.project = loaded
+    state.project = normalizeProject(loaded)
   } else {
     state.project = createEmptyProject()
     seedDefaultTracks()
@@ -136,11 +211,19 @@ export function initStore(): void {
   }
 
   startTickLoop()
+  applyProjectToEngine()
+  syncNow()
+}
+
+/** 把工程级的播放参数同步给音频引擎 */
+function applyProjectToEngine(): void {
   engine.setBpm(state.project.bpm)
   engine.setTimeSignature(state.project.timeSignature)
+  engine.setMasterVolume(state.project.masterVolume)
+  engine.setReverbWet(state.project.reverbWet)
+  engine.setLimiterThreshold(state.project.masterLimiter)
   engine.setLoop(state.loopOn)
   engine.setMetronome(state.metronomeOn, state.countInOn)
-  syncNow()
 }
 
 /** 新建工程默认放两条轨道，避免首屏空白 */
@@ -153,8 +236,9 @@ function seedDefaultTracks(): void {
 /**
  * 统一的心跳循环（requestAnimationFrame）：
  * 1. 同步播放头位置与播放状态
- * 2. 处理节流后的音频重排（拖动音符时避免每帧重排）
- * 3. 清理虚拟键盘高亮
+ * 2. 采样各轨道与总线的实时电平
+ * 3. 处理节流后的音频重排（拖动音符时避免每帧重排）
+ * 4. 清理虚拟键盘高亮
  */
 function startTickLoop(): void {
   if (tickStarted) return
@@ -165,6 +249,9 @@ function startTickLoop(): void {
     state.playheadBeats = engine.getBeats()
     if (state.isCountingIn && engine.getBeats() > 0) state.isCountingIn = false
 
+    // 仅在音频上下文就绪后才采样电平，避免未初始化时读到无意义的 0
+    if (state.audioReady) sampleLevels()
+
     if (syncRequestedAt && performance.now() - syncRequestedAt >= 120) {
       syncRequestedAt = 0
       syncNow()
@@ -174,6 +261,17 @@ function startTickLoop(): void {
     requestAnimationFrame(tick)
   }
   requestAnimationFrame(tick)
+}
+
+/** 采样所有轨道与总线的实时电平（每帧一次，供混音台电平表使用） */
+function sampleLevels(): void {
+  const next: Record<string, number> = {}
+  for (const track of state.project.tracks) {
+    next[track.id] = engine.getTrackLevel(track.id)
+  }
+  state.levels = next
+  state.masterLevel = engine.getMasterLevel()
+  state.limiting = engine.isLimiting()
 }
 
 // ------------------------------------------------------------ 音频同步 / 持久化
@@ -264,6 +362,8 @@ export function setTrackInstrument(id: string, instrument: InstrumentType): void
   commit()
 }
 
+// ---------------------------------------------------------------- 混音操作
+
 export function setTrackVolume(id: string, volume: number): void {
   const track = state.project.tracks.find((t) => t.id === id)
   if (!track) return
@@ -276,6 +376,38 @@ export function setTrackPan(id: string, pan: number): void {
   const track = state.project.tracks.find((t) => t.id === id)
   if (!track) return
   track.pan = clamp(pan, -1, 1)
+  engine.updateMix(track, state.project.tracks)
+  persistOnly()
+}
+
+/** 调整某个均衡频段（dB） */
+export function setTrackEq(id: string, band: EqBand, value: number): void {
+  const track = state.project.tracks.find((t) => t.id === id)
+  if (!track) return
+  track[band] = clamp(value, EQ_MIN, EQ_MAX)
+  engine.setTrackEq(id, band, track[band])
+  persistOnly()
+}
+
+/** 调整混响发送量（0~1） */
+export function setTrackReverbSend(id: string, value: number): void {
+  const track = state.project.tracks.find((t) => t.id === id)
+  if (!track) return
+  track.reverbSend = clamp(value, 0, 1)
+  engine.setTrackReverbSend(id, track.reverbSend)
+  persistOnly()
+}
+
+/** 把某条轨道的均衡与发送一键复位 */
+export function resetTrackMix(id: string): void {
+  const track = state.project.tracks.find((t) => t.id === id)
+  if (!track) return
+  track.volume = DEFAULT_MIX.volume
+  track.pan = DEFAULT_MIX.pan
+  track.eqLow = DEFAULT_MIX.eqLow
+  track.eqMid = DEFAULT_MIX.eqMid
+  track.eqHigh = DEFAULT_MIX.eqHigh
+  track.reverbSend = DEFAULT_MIX.reverbSend
   engine.updateMix(track, state.project.tracks)
   persistOnly()
 }
@@ -396,14 +528,27 @@ export function setMasterVolume(volume: number): void {
   persistOnly()
 }
 
+/** 混响返回量（共享混响总线送回主输出的电平） */
 export function setReverbWet(wet: number): void {
   state.project.reverbWet = clamp(wet, 0, 1)
   engine.setReverbWet(state.project.reverbWet)
   persistOnly()
 }
 
+/** 总线限幅阈值（dB） */
+export function setLimiterThreshold(db: number): void {
+  state.project.masterLimiter = clamp(db, LIMITER_MIN, LIMITER_MAX)
+  engine.setLimiterThreshold(state.project.masterLimiter)
+  persistOnly()
+}
+
 export function setSnapDivision(division: GridDivision): void {
   state.snapDivision = division
+}
+
+/** 切换中央编辑区视图：钢琴卷帘 / 混音台 */
+export function setViewMode(mode: ViewMode): void {
+  state.viewMode = mode
 }
 
 export function toggleMetronome(): void {
@@ -436,18 +581,17 @@ export async function ensureAudio(): Promise<void> {
   if (state.audioReady) return
   await engine.ensureReady()
   state.audioReady = true
+  // 引擎链路刚构建时用的是默认值，这里把工程里保存的混音参数补上
+  applyProjectToEngine()
   syncNow()
 }
 
 export async function play(): Promise<void> {
   await ensureAudio()
-  engine.setBpm(state.project.bpm)
-  engine.setTimeSignature(state.project.timeSignature)
+  applyProjectToEngine()
   engine.syncTracks(state.project)
   engine.scheduleProject(state.project)
   engine.updateAllMix(state.project)
-  engine.setLoop(state.loopOn)
-  engine.setMetronome(state.metronomeOn, state.countInOn)
   state.isCountingIn = state.countInOn && engine.getBeats() < 0.001
   await engine.play()
   state.isPlaying = true
@@ -520,6 +664,7 @@ export function newProject(): void {
   state.selectedNoteIds = []
   state.view.scrollLeft = 0
   commit()
+  applyProjectToEngine()
   syncNow()
 }
 
@@ -529,17 +674,15 @@ export function saveProjectNow(): void {
 }
 
 export function loadProjectById(id: string): void {
-  const project = storage.loadProject(id)
-  if (!project) return
+  const loaded = storage.loadProject(id)
+  if (!loaded) return
+  const project = normalizeProject(loaded)
   stop()
   state.project = project
   state.selectedTrackId = project.tracks[0]?.id ?? ''
   state.selectedNoteIds = []
   state.view.scrollLeft = 0
-  engine.setBpm(project.bpm)
-  engine.setTimeSignature(project.timeSignature)
-  engine.setMasterVolume(project.masterVolume)
-  engine.setReverbWet(project.reverbWet)
+  applyProjectToEngine()
   commit()
   syncNow()
   state.statusText = `已加载：${project.name}`
@@ -562,26 +705,15 @@ export function exportProjectJson(): void {
 export async function importProjectJson(file: File): Promise<void> {
   try {
     const text = await file.text()
-    const parsed = JSON.parse(text) as Project
+    const parsed = JSON.parse(text) as Partial<Project>
     if (!parsed || !Array.isArray(parsed.tracks)) throw new Error('文件结构不正确')
     stop()
-    // 补齐可能缺失的字段，兼容手工编辑过的 JSON
-    const project: Project = {
-      ...createEmptyProject(parsed.name || file.name.replace(/\.json$/i, '')),
-      ...parsed,
-      tracks: parsed.tracks.map((t) => ({
-        ...t,
-        regions: (t.regions ?? []).map((r) => ({ ...r, notes: r.notes ?? [] }))
-      }))
-    }
+    const project = normalizeProject(parsed, file.name.replace(/\.json$/i, ''))
     state.project = project
     state.selectedTrackId = project.tracks[0]?.id ?? ''
     state.selectedNoteIds = []
     state.view.scrollLeft = 0
-    engine.setBpm(project.bpm)
-    engine.setTimeSignature(project.timeSignature)
-    engine.setMasterVolume(project.masterVolume)
-    engine.setReverbWet(project.reverbWet)
+    applyProjectToEngine()
     commit()
     syncNow()
     state.statusText = `已导入：${project.name}`

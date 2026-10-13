@@ -1,12 +1,18 @@
 <script setup lang="ts">
 /**
- * 主输出面板：总音量 + 主混响湿度
+ * 主输出面板（常驻底部栏）
+ * 总音量 + 总线电平表 + 限幅指示 + 混响返回 + 限幅阈值
+ * 更完整的通道级混音请切换到「混音台」视图
  */
 import { computed } from 'vue'
-import { setMasterVolume, setReverbWet, state } from '@/core/store'
+import { setLimiterThreshold, setMasterVolume, setReverbWet, state } from '@/core/store'
+import { LIMITER_MAX, LIMITER_MIN } from '@/types'
 
 const masterPercent = computed(() => Math.round(state.project.masterVolume * 100))
 const wetPercent = computed(() => Math.round(state.project.reverbWet * 100))
+
+/** 电平 0~1 → 百分比宽度（开方让低电平也可见） */
+const levelWidth = computed(() => Math.min(100, Math.sqrt(Math.max(0, state.masterLevel)) * 100))
 
 function onMasterInput(event: Event): void {
   setMasterVolume(Number((event.target as HTMLInputElement).value))
@@ -15,11 +21,22 @@ function onMasterInput(event: Event): void {
 function onWetInput(event: Event): void {
   setReverbWet(Number((event.target as HTMLInputElement).value))
 }
+
+function onLimiterInput(event: Event): void {
+  setLimiterThreshold(Number((event.target as HTMLInputElement).value))
+}
 </script>
 
 <template>
   <aside class="master-panel">
-    <div class="title">总输出 Master</div>
+    <div class="title">
+      <span>总输出 Master</span>
+      <span class="led" :class="{ on: state.limiting }" :title="state.limiting ? '限幅中' : '未触发'" />
+    </div>
+
+    <div class="meter" title="总线输出电平">
+      <div class="meter-fill" :style="{ width: levelWidth + '%' }" />
+    </div>
 
     <label class="row">
       <span class="label">音量</span>
@@ -40,7 +57,20 @@ function onWetInput(event: Event): void {
       <span class="value">{{ wetPercent }}</span>
     </label>
 
-    <p class="tip">主输出链路：轨道 → 声像 → 增益 → 总音量 → 混响 → 扬声器</p>
+    <label class="row">
+      <span class="label">限幅</span>
+      <input
+        type="range"
+        :min="LIMITER_MIN"
+        :max="LIMITER_MAX"
+        step="1"
+        :value="state.project.masterLimiter"
+        @input="onLimiterInput"
+      />
+      <span class="value">{{ state.project.masterLimiter }}</span>
+    </label>
+
+    <p class="tip">干声 + 混响总线 → 总音量 → 限幅 → 扬声器</p>
   </aside>
 </template>
 
@@ -49,15 +79,50 @@ function onWetInput(event: Event): void {
   width: 232px;
   flex: 0 0 232px;
   border-left: 1px solid var(--line);
-  padding: 8px 10px;
+  padding: 6px 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 5px;
   background: var(--panel);
+  overflow: hidden;
 }
 
 .title {
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.led {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #3a3e4a;
+  border: 1px solid var(--line);
+}
+
+.led.on {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  box-shadow: 0 0 6px var(--accent-2);
+}
+
+.meter {
+  height: 6px;
+  border-radius: 3px;
+  background: #14151a;
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  background-image: linear-gradient(to right, #63c78d 0%, #e8c34f 72%, #ff4d6d 100%);
+  background-size: 210px 100%;
+  background-position: left;
+  background-repeat: no-repeat;
+  transition: width 0.06s linear;
 }
 
 .row {
@@ -89,6 +154,6 @@ function onWetInput(event: Event): void {
   margin: 0;
   color: var(--text-dim);
   font-size: 11px;
-  line-height: 1.6;
+  line-height: 1.5;
 }
 </style>

@@ -1,9 +1,6 @@
 import * as Tone from 'tone'
-import type { InstrumentType } from '@/types'
+import type { InstrumentType, MelodicInstrumentType } from '@/types'
 import { midiToNoteName } from '@/utils/music'
-
-/** 去掉鼓组的旋律类音色 */
-export type MelodicInstrumentType = Exclude<InstrumentType, 'drums'>
 
 /**
  * 乐器节点统一接口：
@@ -54,7 +51,10 @@ class MelodicInstrument implements InstrumentNode {
   }
 }
 
-/** 各音色的合成器预设（无需采样文件，纯合成器实现） */
+/**
+ * 各音色的合成器预设（无需采样文件，纯合成器实现）。
+ * 每个预设都用 volume 做了增益平衡，避免切换音色时响度突变。
+ */
 function createPolySynth(type: MelodicInstrumentType): AnyPolySynth {
   switch (type) {
     case 'piano': {
@@ -65,6 +65,7 @@ function createPolySynth(type: MelodicInstrumentType): AnyPolySynth {
       synth.volume.value = -8
       return synth
     }
+
     case 'electricPiano': {
       const synth = new Tone.PolySynth(Tone.FMSynth, {
         harmonicity: 3.01,
@@ -77,6 +78,36 @@ function createPolySynth(type: MelodicInstrumentType): AnyPolySynth {
       synth.volume.value = -10
       return synth
     }
+
+    case 'organ': {
+      // 风琴：方波叠加谐波 + 长延音，模拟拉杆风琴的持续音色
+      const synth = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'square8' },
+        envelope: { attack: 0.008, decay: 0.12, sustain: 0.85, release: 0.35 }
+      })
+      synth.volume.value = -18
+      return synth
+    }
+
+    case 'guitar': {
+      // 吉他：锯齿波 + 快速衰减的滤波包络，模拟拨弦的「弹拨感」
+      const synth = new Tone.PolySynth(Tone.MonoSynth, {
+        oscillator: { type: 'sawtooth' },
+        filter: { Q: 3, type: 'lowpass', rolloff: -12 },
+        envelope: { attack: 0.005, decay: 0.35, sustain: 0.05, release: 0.4 },
+        filterEnvelope: {
+          attack: 0.002,
+          decay: 0.25,
+          sustain: 0.05,
+          release: 0.3,
+          baseFrequency: 220,
+          octaves: 3.2
+        }
+      })
+      synth.volume.value = -12
+      return synth
+    }
+
     case 'bass': {
       const synth = new Tone.PolySynth(Tone.MonoSynth, {
         oscillator: { type: 'sawtooth' },
@@ -94,8 +125,8 @@ function createPolySynth(type: MelodicInstrumentType): AnyPolySynth {
       synth.volume.value = -6
       return synth
     }
-    case 'strings':
-    default: {
+
+    case 'strings': {
       // fatsawtooth = 多层锯齿波叠加，模拟弦乐群奏的厚度
       const synth = new Tone.PolySynth(Tone.Synth, {
         oscillator: { type: 'fatsawtooth', count: 3, spread: 22 },
@@ -104,12 +135,79 @@ function createPolySynth(type: MelodicInstrumentType): AnyPolySynth {
       synth.volume.value = -14
       return synth
     }
+
+    case 'brass': {
+      // 铜管：锯齿波 + 中等起音，强调中高频的金属感
+      const synth = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'sawtooth' },
+        envelope: { attack: 0.05, decay: 0.2, sustain: 0.7, release: 0.3 }
+      })
+      synth.volume.value = -14
+      return synth
+    }
+
+    case 'flute': {
+      // 长笛：纯净正弦 + 慢起音，几乎没有谐波
+      const synth = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'sine' },
+        envelope: { attack: 0.08, decay: 0.15, sustain: 0.85, release: 0.25 }
+      })
+      synth.volume.value = -10
+      return synth
+    }
+
+    case 'bell': {
+      // 铃铛：高调制指数的 FM，产生非谐波泛音，尾音悠长
+      const synth = new Tone.PolySynth(Tone.FMSynth, {
+        harmonicity: 5.1,
+        modulationIndex: 14,
+        oscillator: { type: 'sine' },
+        envelope: { attack: 0.002, decay: 1.6, sustain: 0, release: 1.6 },
+        modulation: { type: 'sine' },
+        modulationEnvelope: { attack: 0.002, decay: 0.6, sustain: 0, release: 0.4 }
+      })
+      synth.volume.value = -14
+      return synth
+    }
+
+    case 'pad': {
+      // 氛围铺底：多层正弦 + 极慢起音与超长释放，用于铺满背景
+      const synth = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'fatsine', count: 3, spread: 30 },
+        envelope: { attack: 0.6, decay: 0.8, sustain: 0.8, release: 2.2 }
+      })
+      synth.volume.value = -16
+      return synth
+    }
+
+    case 'synthLead':
+    default: {
+      // 合成主音：多层锯齿 + 高 Q 低通滤波，突出的旋律线条
+      const synth = new Tone.PolySynth(Tone.MonoSynth, {
+        oscillator: { type: 'fatsawtooth', count: 3, spread: 20 },
+        filter: { Q: 4, type: 'lowpass', rolloff: -24 },
+        envelope: { attack: 0.01, decay: 0.2, sustain: 0.5, release: 0.3 },
+        filterEnvelope: {
+          attack: 0.01,
+          decay: 0.15,
+          sustain: 0.4,
+          release: 0.2,
+          baseFrequency: 300,
+          octaves: 3
+        }
+      })
+      synth.volume.value = -12
+      return synth
+    }
   }
 }
 
+/** 鼓组风格：原声 / 电子，仅合成参数不同，MIDI 映射完全一致 */
+export type DrumStyle = 'acoustic' | 'electronic'
+
 /**
  * 鼓组：GM 标准 MIDI 映射（简化版）
- * 35/36 底鼓、38/40 军鼓、42/44 闭合踩镲、46 开镲、41~50 通鼓、49/57 吊镲
+ * 35/36 底鼓、38/40 军鼓、42/44 闭合踩镲、46 开镲、41~50 通鼓、49/57 吊镲、51/59 叮叮镲
  */
 class DrumKit implements InstrumentNode {
   readonly output: Tone.Gain
@@ -121,72 +219,92 @@ class DrumKit implements InstrumentNode {
   private ride: Tone.MetalSynth
   private tom: Tone.MembraneSynth
   private crash: Tone.MetalSynth
+  /** 军鼓体的音高（原声偏低、电子偏高） */
+  private snareBodyNote: string
 
-  constructor() {
+  constructor(style: DrumStyle = 'acoustic') {
+    const electronic = style === 'electronic'
     this.output = new Tone.Gain(1)
+    this.snareBodyNote = electronic ? 'A3' : 'D3'
 
+    // 底鼓：电子鼓音高下落更快、尾巴更短，听感更「紧」
     this.kick = new Tone.MembraneSynth({
-      pitchDecay: 0.04,
-      octaves: 6,
+      pitchDecay: electronic ? 0.02 : 0.04,
+      octaves: electronic ? 8 : 6,
       oscillator: { type: 'sine' },
-      envelope: { attack: 0.001, decay: 0.36, sustain: 0, release: 0.12 }
+      envelope: {
+        attack: 0.001,
+        decay: electronic ? 0.26 : 0.36,
+        sustain: 0,
+        release: electronic ? 0.08 : 0.12
+      }
     })
-    this.kick.volume.value = -2
+    this.kick.volume.value = electronic ? -1 : -2
 
     // 军鼓 = 白噪声 + 一点音高体，避免听起来像纯噪声
     this.snare = new Tone.NoiseSynth({
       noise: { type: 'white' },
-      envelope: { attack: 0.001, decay: 0.16, sustain: 0 }
+      envelope: { attack: 0.001, decay: electronic ? 0.09 : 0.16, sustain: 0 }
     })
-    this.snare.volume.value = -8
+    this.snare.volume.value = electronic ? -6 : -8
 
     this.snareBody = new Tone.Synth({
       oscillator: { type: 'triangle' },
-      envelope: { attack: 0.001, decay: 0.1, sustain: 0, release: 0.05 }
+      envelope: {
+        attack: 0.001,
+        decay: electronic ? 0.06 : 0.1,
+        sustain: 0,
+        release: 0.05
+      }
     })
     this.snareBody.volume.value = -14
 
     this.hat = new Tone.MetalSynth({
-      envelope: { attack: 0.001, decay: 0.045, release: 0.01 },
-      harmonicity: 5.1,
-      modulationIndex: 32,
-      resonance: 4200,
+      envelope: { attack: 0.001, decay: electronic ? 0.025 : 0.045, release: 0.01 },
+      harmonicity: electronic ? 6.5 : 5.1,
+      modulationIndex: electronic ? 40 : 32,
+      resonance: electronic ? 6000 : 4200,
       octaves: 1.5
     })
     this.hat.volume.value = -20
 
     this.openHat = new Tone.MetalSynth({
-      envelope: { attack: 0.001, decay: 0.36, release: 0.05 },
-      harmonicity: 5.1,
-      modulationIndex: 32,
-      resonance: 4200,
+      envelope: { attack: 0.001, decay: electronic ? 0.2 : 0.36, release: 0.05 },
+      harmonicity: electronic ? 6.5 : 5.1,
+      modulationIndex: electronic ? 40 : 32,
+      resonance: electronic ? 6000 : 4200,
       octaves: 1.5
     })
     this.openHat.volume.value = -22
 
     this.ride = new Tone.MetalSynth({
-      envelope: { attack: 0.001, decay: 0.6, release: 0.1 },
-      harmonicity: 3.1,
+      envelope: { attack: 0.001, decay: electronic ? 0.35 : 0.6, release: 0.1 },
+      harmonicity: electronic ? 4.2 : 3.1,
       modulationIndex: 24,
-      resonance: 3200,
+      resonance: electronic ? 5000 : 3200,
       octaves: 2
     })
     this.ride.volume.value = -24
 
     this.tom = new Tone.MembraneSynth({
-      pitchDecay: 0.08,
-      octaves: 4,
+      pitchDecay: electronic ? 0.05 : 0.08,
+      octaves: electronic ? 5 : 4,
       oscillator: { type: 'sine' },
-      envelope: { attack: 0.001, decay: 0.3, sustain: 0, release: 0.1 }
+      envelope: {
+        attack: 0.001,
+        decay: electronic ? 0.2 : 0.3,
+        sustain: 0,
+        release: 0.1
+      }
     })
     this.tom.volume.value = -8
 
     this.crash = new Tone.MetalSynth({
-      envelope: { attack: 0.002, decay: 1.1, release: 0.4 },
-      harmonicity: 2.4,
+      envelope: { attack: 0.002, decay: electronic ? 0.7 : 1.1, release: 0.4 },
+      harmonicity: electronic ? 3.2 : 2.4,
       modulationIndex: 40,
-      resonance: 2600,
-      octaves: 3
+      resonance: electronic ? 4000 : 2600,
+      octaves: electronic ? 2.5 : 3
     })
     this.crash.volume.value = -22
 
@@ -230,7 +348,7 @@ class DrumKit implements InstrumentNode {
       case 40:
       case 39:
         this.snare.triggerAttackRelease('16n', hit, vel)
-        this.snareBody.triggerAttackRelease('D3', '16n', hit, vel * 0.5)
+        this.snareBody.triggerAttackRelease(this.snareBodyNote, '16n', hit, vel * 0.5)
         break
       case 42:
       case 44:
@@ -278,11 +396,12 @@ class DrumKit implements InstrumentNode {
 
 /** 工厂：按音色类型创建乐器节点（可在离线渲染上下文中复用） */
 export function createInstrument(type: InstrumentType): InstrumentNode {
-  if (type === 'drums') return new DrumKit()
+  if (type === 'drums') return new DrumKit('acoustic')
+  if (type === 'electroDrums') return new DrumKit('electronic')
   return new MelodicInstrument(type)
 }
 
 /** 判断是否为鼓组（鼓组用 MIDI 音号，旋律用音名） */
 export function isDrumTrack(type: InstrumentType): boolean {
-  return type === 'drums'
+  return type === 'drums' || type === 'electroDrums'
 }

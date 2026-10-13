@@ -14,6 +14,7 @@ import {
   renameProject,
   setBpm,
   setTimeSignature,
+  setViewMode,
   toggleMetronome,
   toggleCountIn,
   toggleLoop,
@@ -21,7 +22,7 @@ import {
   stop
 } from '@/core/store'
 import { beatsPerBarOf, formatPosition } from '@/utils/music'
-import type { TimeSignature } from '@/types'
+import type { TimeSignature, ViewMode } from '@/types'
 
 const emit = defineEmits<{ (e: 'open-history'): void }>()
 
@@ -133,6 +134,26 @@ async function onFileChange(event: Event): Promise<void> {
     </div>
 
     <div class="spacer" />
+
+    <!-- 中央编辑区视图切换 -->
+    <div class="group views">
+      <button
+        :class="{ active: state.viewMode === 'piano' }"
+        title="钢琴卷帘编辑器"
+        @click="setViewMode('piano')"
+      >
+        钢琴卷帘
+      </button>
+      <button
+        :class="{ active: state.viewMode === 'mixer' }"
+        title="混音台：音量、声像、均衡、混响发送"
+        @click="setViewMode('mixer')"
+      >
+        混音台
+      </button>
+    </div>
+
+    <div class="divider" />
 
     <span v-if="!state.audioReady" class="hint">点击页面任意位置启用音频</span>
     <span v-else-if="state.statusText" class="status">{{ state.statusText }}</span>
