@@ -254,7 +254,7 @@ onBeforeUnmount(() => {
   <header class="toolbar">
     <!-- 品牌与工程名 -->
     <div class="group brand">
-      <span class="logo">TomePome</span>
+      <span class="logo" role="img" aria-label="TonePome" />
       <input
         class="name-input"
         :value="state.project.name"
@@ -442,10 +442,18 @@ onBeforeUnmount(() => {
   flex: 1;
 }
 
+/*
+ * 品牌 LOGO：整条横图（728×128）用 CSS mask 着色，
+ * 背景色取主题强调色，因此深浅色模式下都能正常显示
+ * （源 SVG 是纯白 + 透明底，直接当图片贴在浅色背景上会看不见）。
+ */
 .logo {
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  color: var(--accent);
+  display: inline-block;
+  width: 102px;
+  height: 18px;
+  background-color: var(--accent);
+  -webkit-mask: url('../assets/tone-pome-logo.svg') no-repeat center / contain;
+  mask: url('../assets/tone-pome-logo.svg') no-repeat center / contain;
 }
 
 .name-input {

@@ -8,6 +8,7 @@ import { INSTRUMENT_OPTIONS } from '@/types'
 import {
   state,
   moveTrack,
+  openCustomSound,
   removeTrack,
   renameTrack,
   selectTrack,
@@ -35,12 +36,40 @@ const panText = computed(() => {
   return pan < 0 ? `L${Math.round(-pan * 100)}` : `R${Math.round(pan * 100)}`
 })
 
+/** 工程内的自定义音源（供音色下拉框动态列出） */
+const customInstruments = computed(() => state.project.customInstruments)
+
+/**
+ * 下拉框的当前值：内置音色直接用类型名，
+ * 自定义音色用 `custom:<id>` 复合值，以便区分多套自定义音源。
+ */
+const instrumentValue = computed(() =>
+  props.track.instrument === 'custom'
+    ? `custom:${props.track.customInstrumentId}`
+    : props.track.instrument
+)
+
+/** 「管理自定义音源」哨兵值：选中后打开管理对话框并还原选择 */
+const MANAGE_VALUE = '__manage__'
+
 function onNameChange(event: Event): void {
   renameTrack(props.track.id, (event.target as HTMLInputElement).value.trim())
 }
 
 function onInstrumentChange(event: Event): void {
-  setTrackInstrument(props.track.id, (event.target as HTMLSelectElement).value as InstrumentType)
+  const select = event.target as HTMLSelectElement
+  const value = select.value
+  if (value === MANAGE_VALUE) {
+    openCustomSound()
+    // 该选项不是真实音色，还原下拉框显示，避免轨道被误改为空音色
+    select.value = instrumentValue.value
+    return
+  }
+  if (value.startsWith('custom:')) {
+    setTrackInstrument(props.track.id, 'custom', value.slice('custom:'.length))
+    return
+  }
+  setTrackInstrument(props.track.id, value as InstrumentType)
 }
 
 function onVolumeInput(event: Event): void {
@@ -63,10 +92,16 @@ function onPanInput(event: Event): void {
     </div>
 
     <div class="line">
-      <select v-if="!isAudio" class="inst" :value="track.instrument" @change="onInstrumentChange">
+      <select v-if="!isAudio" class="inst" :value="instrumentValue" @change="onInstrumentChange">
         <option v-for="option in INSTRUMENT_OPTIONS" :key="option.value" :value="option.value">
           {{ option.label }}
         </option>
+        <optgroup v-if="customInstruments.length" label="自定义音源">
+          <option v-for="ci in customInstruments" :key="ci.id" :value="`custom:${ci.id}`">
+            {{ ci.name }}（{{ ci.kind === 'drum' ? '鼓组' : '旋律' }}）
+          </option>
+        </optgroup>
+        <option :value="MANAGE_VALUE">管理自定义音源…</option>
       </select>
       <template v-else>
         <span class="badge">音频</span>

@@ -10,6 +10,7 @@ import TopToolbar from './components/TopToolbar.vue'
 import DockRegion from './components/DockRegion.vue'
 import ProjectDialog from './components/ProjectDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
+import CustomSoundDialog from './components/CustomSoundDialog.vue'
 import {
   layout,
   layoutUi,
@@ -160,6 +161,7 @@ onBeforeUnmount(() => {
 
     <ProjectDialog :open="historyOpen" @close="historyOpen = false" />
     <SettingsDialog v-if="state.settingsOpen" />
+    <CustomSoundDialog v-if="state.customSoundOpen" />
   </div>
 </template>
 

@@ -10,6 +10,7 @@ import { computed } from 'vue'
 import type { DeviceMode } from '@/types'
 import {
   closeSettings,
+  openCustomSound,
   setDeviceMode,
   setLongPressDuration,
   state,
@@ -57,6 +58,13 @@ function onEnterEditMode(): void {
 function onResetLayout(): void {
   resetLayout()
   state.statusText = '已恢复默认布局'
+}
+
+/** 打开自定义音源管理：先关闭设置，避免两个对话框叠加 */
+function onOpenCustomSound(): void {
+  closeSettings()
+  openCustomSound()
+  emit('close')
 }
 </script>
 
@@ -111,6 +119,16 @@ function onResetLayout(): void {
               {{ state.touchKeyboardAlwaysOn ? '开' : '关' }}
             </button>
           </label>
+        </section>
+
+        <section class="group">
+          <h3>自定义音源</h3>
+          <p class="desc">
+            内置音色的采样并不齐全（例如鼓组只有踩镲、缺少吊镲）。导入自己的采样拼装成一套音源后，即可在轨道音色下拉框中选择使用。
+          </p>
+          <div class="row layout-row">
+            <button class="primary" @click="onOpenCustomSound">管理自定义音源</button>
+          </div>
         </section>
 
         <section class="group">

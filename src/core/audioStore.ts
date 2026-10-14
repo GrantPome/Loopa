@@ -153,3 +153,27 @@ export function audioBufferToPcm(buffer: AudioBuffer): PcmData {
   }
   return { channels, sampleRate: buffer.sampleRate }
 }
+
+/**
+ * 把 PCM 采样打包成 AudioBuffer（WebAudio 的通用数据容器）。
+ * 音频片段与自定义音源采样都走这里，保证两处数据格式一致。
+ */
+export function pcmToAudioBuffer(pcm: PcmData): AudioBuffer {
+  const channelCount = pcm.channels.length
+  const length = pcm.channels[0]?.length ?? 0
+  const buffer = new AudioBuffer({
+    numberOfChannels: Math.max(1, channelCount),
+    length: Math.max(1, length),
+    sampleRate: pcm.sampleRate
+  })
+  for (let c = 0; c < channelCount; c += 1) {
+    buffer.getChannelData(c).set(pcm.channels[c])
+  }
+  return buffer
+}
+
+/** 采样缓存键 → AudioBuffer（同步读取，供引擎排期与自定义音源构建使用） */
+export function cachedPcmToAudioBuffer(key: string): AudioBuffer | null {
+  const pcm = cache.get(key)
+  return pcm ? pcmToAudioBuffer(pcm) : null
+}

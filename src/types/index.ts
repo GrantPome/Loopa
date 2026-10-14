@@ -28,8 +28,49 @@ export type MelodicInstrumentType =
 /** 鼓组音色（按 GM MIDI 音号映射到不同鼓件） */
 export type DrumInstrumentType = 'drums' | 'electroDrums'
 
-/** 全部内置音色 */
-export type InstrumentType = MelodicInstrumentType | DrumInstrumentType
+/**
+ * 全部音色类型。
+ * 'custom' 表示用户导入采样组成的自定义音源，
+ * 具体指向哪一套音源由 Track.customInstrumentId 决定。
+ */
+export type InstrumentType = MelodicInstrumentType | DrumInstrumentType | 'custom'
+
+// ---------------------------------------------------------------- 自定义音源
+
+/**
+ * 自定义音源类型：
+ * - melodic：旋律采样器，按采样原始音高做就近匹配 + 移调，可弹任意音高
+ * - drum：鼓组采样，每个采样绑定一个 MIDI 音号，命中即原速播放（不移调）
+ */
+export type CustomInstrumentKind = 'melodic' | 'drum'
+
+/** 一个采样：PCM 数据存放在 IndexedDB（key），工程 JSON 只留元信息 */
+export interface CustomSample {
+  id: string
+  name: string
+  /** IndexedDB 中的采样键 */
+  key: string
+  /** 采样原始音高（MIDI 音号），旋律音源据此计算移调量 */
+  rootMidi: number
+  /** 采样绑定的目标 MIDI 音号：鼓组音源据此决定命中哪个鼓件 */
+  midi: number
+  /** 采样增益 0~2（1 为原始音量） */
+  gain: number
+  /** 源音频时长（秒），用于界面显示 */
+  duration: number
+}
+
+/** 一套自定义音源：由若干采样组成，作为独立音色供轨道使用 */
+export interface CustomInstrument {
+  id: string
+  name: string
+  kind: CustomInstrumentKind
+  /** 整体增益 0~2 */
+  gain: number
+  samples: CustomSample[]
+  createdAt: number
+  updatedAt: number
+}
 
 /**
  * 网格精度（单位：拍）
@@ -273,6 +314,8 @@ export interface Track {
   kind: TrackKind
   /** 音色：仅 midi 轨使用；audio 轨保留该字段以兼容统一结构 */
   instrument: InstrumentType
+  /** 当 instrument === 'custom' 时，指向 Project.customInstruments 中的音源 id */
+  customInstrumentId: string
   /** 音量推子 0~1 */
   volume: number
   /** 声像 -1（左）~ 1（右） */
@@ -313,6 +356,8 @@ export interface Project {
   /** 工程小节数（决定时间轴长度） */
   bars: number
   tracks: Track[]
+  /** 工程内的自定义音源库（采样元信息；PCM 存放于 IndexedDB） */
+  customInstruments: CustomInstrument[]
   createdAt: number
   updatedAt: number
 }
@@ -381,7 +426,58 @@ export const INSTRUMENT_LABELS: Record<InstrumentType, string> = {
   pad: '氛围铺底',
   synthLead: '合成主音',
   drums: '鼓组',
-  electroDrums: '电子鼓组'
+  electroDrums: '电子鼓组',
+  custom: '自定义音源'
+}
+
+/**
+ * 解析轨道音色的显示名：
+ * 内置音色直接取标签，自定义音色则取对应音源的名字（找不到时退回「自定义音源」）。
+ */
+export function resolveInstrumentLabel(
+  instrument: InstrumentType,
+  customInstruments: CustomInstrument[] | undefined,
+  customInstrumentId = ''
+): string {
+  if (instrument !== 'custom') return INSTRUMENT_LABELS[instrument]
+  const found = (customInstruments ?? []).find((c) => c.id === customInstrumentId)
+  return found ? found.name : INSTRUMENT_LABELS.custom
+}
+
+/**
+ * GM 标准鼓件映射（简化版）：供自定义鼓组音源分配音号时选择。
+ * 与内置 DrumKit 的映射保持一致，方便用户把采样挂到熟悉的音号上。
+ */
+export const GM_DRUM_NOTES: { midi: number; label: string }[] = [
+  { midi: 35, label: '底鼓 2' },
+  { midi: 36, label: '底鼓 1' },
+  { midi: 37, label: '边击' },
+  { midi: 38, label: '军鼓 1' },
+  { midi: 39, label: '拍手' },
+  { midi: 40, label: '军鼓 2' },
+  { midi: 41, label: '低音通鼓' },
+  { midi: 42, label: '闭合踩镲' },
+  { midi: 43, label: '高音通鼓' },
+  { midi: 44, label: '踏镲' },
+  { midi: 45, label: '中低音通鼓' },
+  { midi: 46, label: '开镲' },
+  { midi: 47, label: '中音通鼓' },
+  { midi: 48, label: '中高音通鼓' },
+  { midi: 49, label: '吊镲 1（大擦）' },
+  { midi: 50, label: '高音通鼓' },
+  { midi: 51, label: '叮叮镲 1' },
+  { midi: 52, label: '中国镲' },
+  { midi: 53, label: '镲铃' },
+  { midi: 54, label: '铃鼓' },
+  { midi: 55, label: '水镲' },
+  { midi: 56, label: '牛铃' },
+  { midi: 57, label: '吊镲 2' },
+  { midi: 59, label: '叮叮镲 2' }
+]
+
+/** 按音号查找 GM 鼓件名称（未收录时退回音号文本） */
+export function drumNoteLabel(midi: number): string {
+  return GM_DRUM_NOTES.find((n) => n.midi === midi)?.label ?? `音号 ${midi}`
 }
 
 /** 轨道配色（参考库乐队，简约低饱和） */

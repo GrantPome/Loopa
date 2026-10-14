@@ -1,6 +1,9 @@
 import { reactive } from 'vue'
 import type {
   AudioClip,
+  CustomInstrument,
+  CustomInstrumentKind,
+  CustomSample,
   EffectType,
   EqBand,
   GridDivision,
@@ -28,7 +31,9 @@ import {
   TRACK_COLORS,
   VELOCITY_MAX,
   VELOCITY_MIN,
-  defaultEffectParams
+  defaultEffectParams,
+  drumNoteLabel,
+  resolveInstrumentLabel
 } from '@/types'
 import {
   MAX_MIDI,
@@ -119,6 +124,8 @@ export interface AppState {
   deviceMode: DeviceMode
   /** 设置对话框是否打开 */
   settingsOpen: boolean
+  /** 自定义音源管理对话框是否打开 */
+  customSoundOpen: boolean
   /** Pad 端长按触发时间（ms）：超过该时长即视为长按，用于启动框选或弹出右键菜单 */
   longPressDuration: number
   /** Pad 端是否在底部常驻显示虚拟键盘（PC 端默认折叠） */
@@ -152,6 +159,7 @@ export function createEmptyProject(name = '未命名工程'): Project {
     masterLimiter: -1,
     bars: 8,
     tracks: [],
+    customInstruments: [],
     createdAt: now,
     updatedAt: now
   }
@@ -171,14 +179,17 @@ export function createTrack(
   project: Project,
   instrument: InstrumentType,
   index: number,
-  kind: TrackKind = 'midi'
+  kind: TrackKind = 'midi',
+  customInstrumentId = ''
 ): Track {
   const isAudio = kind === 'audio'
+  const label = resolveInstrumentLabel(instrument, project.customInstruments, customInstrumentId)
   return {
     id: uid('trk'),
-    name: isAudio ? `音频轨 ${index + 1}` : `${INSTRUMENT_LABELS[instrument]} ${index + 1}`,
+    name: isAudio ? `音频轨 ${index + 1}` : `${label} ${index + 1}`,
     kind,
     instrument,
+    customInstrumentId: instrument === 'custom' ? customInstrumentId : '',
     ...(isAudio ? DEFAULT_AUDIO_MIX : DEFAULT_MIX),
     effects: [],
     mute: false,
@@ -249,6 +260,42 @@ function normalizeClips(raw: unknown): AudioClip[] {
 }
 
 /**
+ * 自定义音源归一化：补齐旧数据缺失字段，保证采样结构完整、音号合法。
+ * 旧工程没有 customInstruments 字段时返回空数组。
+ */
+function normalizeCustomInstruments(raw: unknown): CustomInstrument[] {
+  if (!Array.isArray(raw)) return []
+  const out: CustomInstrument[] = []
+  for (const item of raw as Partial<CustomInstrument>[]) {
+    if (!item?.id) continue
+    const kind: CustomInstrumentKind = item.kind === 'drum' ? 'drum' : 'melodic'
+    const samples: CustomSample[] = []
+    for (const s of (item.samples ?? []) as Partial<CustomSample>[]) {
+      if (!s?.key) continue
+      samples.push({
+        id: s.id ?? uid('smp'),
+        name: s.name ?? '采样',
+        key: s.key,
+        rootMidi: clamp(Math.round(Number(s.rootMidi) || 60), MIN_MIDI, MAX_MIDI),
+        midi: clamp(Math.round(Number(s.midi) || 36), MIN_MIDI, MAX_MIDI),
+        gain: clamp(Number(s.gain ?? 1) || 0, 0, 2),
+        duration: Math.max(0, Number(s.duration) || 0)
+      })
+    }
+    out.push({
+      id: item.id,
+      name: item.name ?? '自定义音源',
+      kind,
+      gain: clamp(Number(item.gain ?? 1) || 0, 0, 2),
+      samples,
+      createdAt: Number(item.createdAt) || Date.now(),
+      updatedAt: Number(item.updatedAt) || Date.now()
+    })
+  }
+  return out
+}
+
+/**
  * 补齐工程里可能缺失的字段（兼容旧版本 localStorage 数据与手工编辑过的 JSON）。
  * 音频引擎与 UI 都假设这些字段一定存在，因此在入口处统一做一次归一化。
  */
@@ -260,6 +307,7 @@ function normalizeTrack(raw: Partial<Track>, index: number): Track {
     name: raw.name ?? `轨道 ${index + 1}`,
     kind,
     instrument: (raw.instrument ?? 'piano') as InstrumentType,
+    customInstrumentId: typeof raw.customInstrumentId === 'string' ? raw.customInstrumentId : '',
     volume: clamp(raw.volume ?? DEFAULT_MIX.volume, 0, 1),
     pan: clamp(raw.pan ?? DEFAULT_MIX.pan, -1, 1),
     eqLow: clamp(raw.eqLow ?? DEFAULT_MIX.eqLow, EQ_MIN, EQ_MAX),
@@ -291,6 +339,16 @@ function normalizeTrack(raw: Partial<Track>, index: number): Track {
 
 export function normalizeProject(raw: Partial<Project>, fallbackName = '未命名工程'): Project {
   const base = createEmptyProject(raw.name ?? fallbackName)
+  const customInstruments = normalizeCustomInstruments(raw.customInstruments)
+  const tracks = (raw.tracks ?? []).map((t, i) => normalizeTrack(t, i))
+  // 引用了已不存在的自定义音源的轨道，回退到内置钢琴，避免出现静音轨道
+  const customIds = new Set(customInstruments.map((c) => c.id))
+  for (const track of tracks) {
+    if (track.instrument === 'custom' && !customIds.has(track.customInstrumentId)) {
+      track.instrument = 'piano'
+      track.customInstrumentId = ''
+    }
+  }
   return {
     ...base,
     ...raw,
@@ -300,7 +358,8 @@ export function normalizeProject(raw: Partial<Project>, fallbackName = '未命�
     reverbWet: clamp(raw.reverbWet ?? base.reverbWet, 0, 1),
     masterLimiter: clamp(raw.masterLimiter ?? base.masterLimiter, LIMITER_MIN, LIMITER_MAX),
     bars: raw.bars ?? base.bars,
-    tracks: (raw.tracks ?? []).map((t, i) => normalizeTrack(t, i)),
+    tracks,
+    customInstruments,
     createdAt: raw.createdAt ?? base.createdAt,
     updatedAt: raw.updatedAt ?? base.updatedAt
   }
@@ -331,6 +390,7 @@ export const state = reactive<AppState>({
   volumeDisplay: 'db',
   deviceMode: 'pc',
   settingsOpen: false,
+  customSoundOpen: false,
   longPressDuration: 450,
   touchKeyboardAlwaysOn: true,
   levels: {},
@@ -393,19 +453,23 @@ function seedDefaultTracks(): void {
 }
 
 /**
- * 收集工程中全部音频片段引用的采样键。
+ * 收集工程中全部需要持久化的采样键：
+ * 音频片段引用的采样 + 自定义音源里的采样。
  * 注意：这里也会对 localStorage 里的「历史工程」原始数据调用，
- * 它们可能是引入音频轨之前的旧结构（缺少 tracks / clips），因此逐层兜底。
+ * 它们可能是旧结构（缺少 tracks / clips / customInstruments），因此逐层兜底。
  */
-function collectClipKeys(project: Project): string[] {
+function collectPcmKeys(project: Project): string[] {
   const keys = new Set<string>()
   ;(project.tracks ?? []).forEach((t) => (t.clips ?? []).forEach((c) => keys.add(c.key)))
+  ;(project.customInstruments ?? []).forEach((ci) =>
+    (ci.samples ?? []).forEach((s) => keys.add(s.key))
+  )
   return Array.from(keys)
 }
 
 /** 把工程里用到的采样读入内存缓存，供音频引擎同步取用 */
 async function hydrateAudio(): Promise<void> {
-  const keys = collectClipKeys(state.project)
+  const keys = collectPcmKeys(state.project)
   if (keys.length === 0) return
   const loaded = await preloadPcm(keys)
   if (loaded.length > 0) commit()
@@ -414,8 +478,8 @@ async function hydrateAudio(): Promise<void> {
 /** 清理所有历史工程都不再引用的采样，避免 IndexedDB 无限膨胀 */
 async function pruneOrphanAudio(): Promise<void> {
   const keep = new Set<string>()
-  storage.readProjects().forEach((p) => collectClipKeys(p).forEach((k) => keep.add(k)))
-  collectClipKeys(state.project).forEach((k) => keep.add(k))
+  storage.readProjects().forEach((p) => collectPcmKeys(p).forEach((k) => keep.add(k)))
+  collectPcmKeys(state.project).forEach((k) => keep.add(k))
   await prunePcm(Array.from(keep))
 }
 
@@ -564,8 +628,14 @@ function alignViewModeWithTrack(track: Track | undefined): void {
   else if (track?.kind === 'midi' && state.viewMode === 'audio') state.viewMode = 'piano'
 }
 
-export function addTrack(instrument: InstrumentType = 'piano'): void {
-  const track = createTrack(state.project, instrument, state.project.tracks.length)
+export function addTrack(instrument: InstrumentType = 'piano', customInstrumentId = ''): void {
+  const track = createTrack(
+    state.project,
+    instrument,
+    state.project.tracks.length,
+    'midi',
+    customInstrumentId
+  )
   state.project.tracks.push(track)
   state.selectedTrackId = track.id
   state.selectedNoteIds = []
@@ -625,11 +695,23 @@ export function renameTrack(id: string, name: string): void {
   commit()
 }
 
-export function setTrackInstrument(id: string, instrument: InstrumentType): void {
+/**
+ * 切换轨道音色。
+ * instrument === 'custom' 时需要同时给出 customInstrumentId，其余音色会清空该字段。
+ */
+export function setTrackInstrument(
+  id: string,
+  instrument: InstrumentType,
+  customInstrumentId = ''
+): void {
   const track = state.project.tracks.find((t) => t.id === id)
-  if (!track || track.kind === 'audio' || track.instrument === instrument) return
+  if (!track || track.kind === 'audio') return
+  const nextCustomId = instrument === 'custom' ? customInstrumentId : ''
+  if (track.instrument === instrument && track.customInstrumentId === nextCustomId) return
   track.instrument = instrument
-  record(`切换音色：${INSTRUMENT_LABELS[instrument]}`)
+  track.customInstrumentId = nextCustomId
+  const label = resolveInstrumentLabel(instrument, state.project.customInstruments, nextCustomId)
+  record(`切换音色：${label}`)
   commit()
 }
 
@@ -1061,11 +1143,16 @@ function secondsPerBeat(): number {
   return 60 / state.project.bpm
 }
 
-/** 判断某个采样键是否还有别的片段在用（拆分后的片段会共用同一份采样） */
+/**
+ * 判断某个采样键是否还有别的引用（音频片段或自定义音源采样）。
+ * 拆分后的片段会共用同一份采样，因此比较时排除正在操作的那一个。
+ */
 function isPcmKeyStillUsed(key: string, excludeClipId = ''): boolean {
-  return state.project.tracks.some((t) =>
+  const inClips = state.project.tracks.some((t) =>
     t.clips.some((c) => c.key === key && c.id !== excludeClipId)
   )
+  if (inClips) return true
+  return state.project.customInstruments.some((ci) => ci.samples.some((s) => s.key === key))
 }
 
 /** 采样不再被任何片段引用时，从 IndexedDB 中删除 */
@@ -1378,6 +1465,200 @@ export async function previewActiveClip(): Promise<void> {
   engine.previewClip(track.id, clip.key, clip.offset, clip.duration * secondsPerBeat())
 }
 
+// ------------------------------------------------------------ 自定义音源
+
+/** 自定义音源默认音号：鼓组用底鼓（36），旋律用中央 C（60） */
+const DEFAULT_DRUM_MIDI = 36
+const DEFAULT_ROOT_MIDI = 60
+/** GM 鼓件音号顺序：新增鼓采样时自动挑一个尚未占用的音号 */
+const DRUM_MIDI_ORDER = [
+  36, 38, 42, 46, 39, 40, 41, 43, 45, 47, 48, 50, 49, 51, 52, 53, 54, 55, 56, 57, 59, 35, 37, 44
+]
+
+function findCustomInstrument(id: string): CustomInstrument | undefined {
+  return state.project.customInstruments.find((c) => c.id === id)
+}
+
+/** 新建一套自定义音源，返回其 id */
+export function addCustomInstrument(name: string, kind: CustomInstrumentKind): string {
+  const now = Date.now()
+  const custom: CustomInstrument = {
+    id: uid('csnd'),
+    name: name.trim() || (kind === 'drum' ? '自定义鼓组' : '自定义音色'),
+    kind,
+    gain: 1,
+    samples: [],
+    createdAt: now,
+    updatedAt: now
+  }
+  state.project.customInstruments.push(custom)
+  record(`新建自定义音源：${custom.name}`)
+  commit()
+  return custom.id
+}
+
+export function renameCustomInstrument(id: string, name: string): void {
+  const custom = findCustomInstrument(id)
+  if (!custom) return
+  const next = name.trim()
+  if (!next || next === custom.name) return
+  custom.name = next
+  custom.updatedAt = Date.now()
+  record('重命名自定义音源')
+  commit()
+}
+
+export function setCustomInstrumentKind(id: string, kind: CustomInstrumentKind): void {
+  const custom = findCustomInstrument(id)
+  if (!custom || custom.kind === kind) return
+  custom.kind = kind
+  // 旋律采样原本没有「音号」概念，切到鼓组时按 GM 顺序重新分配冲突的音号，
+  // 避免多个采样挤在同一个音号上导致命中不到
+  if (kind === 'drum') {
+    const used = new Set<number>()
+    for (const sample of custom.samples) {
+      if (used.has(sample.midi)) {
+        sample.midi = DRUM_MIDI_ORDER.find((m) => !used.has(m)) ?? sample.midi
+      }
+      used.add(sample.midi)
+    }
+  }
+  custom.updatedAt = Date.now()
+  record('修改自定义音源类型')
+  commit()
+}
+
+export function setCustomInstrumentGain(id: string, gain: number): void {
+  const custom = findCustomInstrument(id)
+  if (!custom) return
+  custom.gain = clamp(gain, 0, 2)
+  custom.updatedAt = Date.now()
+  record('调整自定义音源增益', `csnd:${id}:gain`)
+  commit()
+}
+
+/** 给鼓组音源挑一个尚未占用的 GM 音号 */
+function nextFreeDrumMidi(custom: CustomInstrument): number {
+  const used = new Set(custom.samples.map((s) => s.midi))
+  return DRUM_MIDI_ORDER.find((m) => !used.has(m)) ?? DEFAULT_DRUM_MIDI
+}
+
+/**
+ * 往自定义音源里添加一个采样。
+ * 采样 PCM 写入 IndexedDB，工程 JSON 只保留元信息。
+ */
+export async function addCustomSample(
+  instrumentId: string,
+  pcm: PcmData,
+  name: string,
+  opts: { midi?: number; rootMidi?: number; gain?: number } = {}
+): Promise<string | null> {
+  const custom = findCustomInstrument(instrumentId)
+  if (!custom || pcm.channels.length === 0 || pcm.channels[0].length === 0) return null
+  const key = uid('pcm')
+  await putPcm(key, pcm)
+  const duration = pcm.channels[0].length / pcm.sampleRate
+  const rootMidi = clamp(Math.round(opts.rootMidi ?? DEFAULT_ROOT_MIDI), MIN_MIDI, MAX_MIDI)
+  const defaultMidi = custom.kind === 'drum' ? nextFreeDrumMidi(custom) : rootMidi
+  const sample: CustomSample = {
+    id: uid('smp'),
+    name: name.trim() || (custom.kind === 'drum' ? drumNoteLabel(defaultMidi) : '采样'),
+    key,
+    rootMidi,
+    midi: clamp(Math.round(opts.midi ?? defaultMidi), MIN_MIDI, MAX_MIDI),
+    gain: clamp(opts.gain ?? 1, 0, 2),
+    duration
+  }
+  custom.samples.push(sample)
+  custom.updatedAt = Date.now()
+  record(`添加采样：${sample.name}`)
+  commit()
+  return sample.id
+}
+
+/** 修改采样元信息（名称 / 音号 / 原始音高 / 增益） */
+export function updateCustomSample(
+  instrumentId: string,
+  sampleId: string,
+  patch: Partial<Pick<CustomSample, 'name' | 'midi' | 'rootMidi' | 'gain'>>
+): void {
+  const custom = findCustomInstrument(instrumentId)
+  const sample = custom?.samples.find((s) => s.id === sampleId)
+  if (!custom || !sample) return
+  if (patch.name !== undefined) sample.name = patch.name.trim() || sample.name
+  if (patch.midi !== undefined) sample.midi = clamp(Math.round(patch.midi), MIN_MIDI, MAX_MIDI)
+  if (patch.rootMidi !== undefined) {
+    sample.rootMidi = clamp(Math.round(patch.rootMidi), MIN_MIDI, MAX_MIDI)
+  }
+  if (patch.gain !== undefined) sample.gain = clamp(patch.gain, 0, 2)
+  custom.updatedAt = Date.now()
+  record('修改采样设置', `smp:${sampleId}`)
+  commit()
+}
+
+/** 删除一个采样（采样若无人引用则一并从 IndexedDB 清掉） */
+export async function removeCustomSample(instrumentId: string, sampleId: string): Promise<void> {
+  const custom = findCustomInstrument(instrumentId)
+  if (!custom) return
+  const index = custom.samples.findIndex((s) => s.id === sampleId)
+  if (index < 0) return
+  const [removed] = custom.samples.splice(index, 1)
+  custom.updatedAt = Date.now()
+  if (!isPcmKeyStillUsed(removed.key)) await deletePcm(removed.key)
+  record(`删除采样：${removed.name}`)
+  commit()
+}
+
+/** 删除整套自定义音源：引用它的轨道回退到内置钢琴，避免出现静音轨道 */
+export async function removeCustomInstrument(id: string): Promise<void> {
+  const index = state.project.customInstruments.findIndex((c) => c.id === id)
+  if (index < 0) return
+  const [removed] = state.project.customInstruments.splice(index, 1)
+  for (const track of state.project.tracks) {
+    if (track.instrument === 'custom' && track.customInstrumentId === id) {
+      track.instrument = 'piano'
+      track.customInstrumentId = ''
+    }
+  }
+  for (const sample of removed.samples) {
+    if (!isPcmKeyStillUsed(sample.key)) await deletePcm(sample.key)
+  }
+  record(`删除自定义音源：${removed.name}`)
+  commit()
+}
+
+/** 导入一个音频文件作为自定义音源采样 */
+export async function importCustomSampleFile(instrumentId: string, file: File): Promise<void> {
+  await ensureAudio()
+  state.busy = true
+  state.statusText = '正在解析采样文件…'
+  try {
+    const pcm = await decodeAudioFile(file)
+    const name = file.name.replace(/\.[^.]+$/, '')
+    const id = await addCustomSample(instrumentId, pcm, name)
+    state.statusText = id ? `已添加采样：${name}` : '添加采样失败：音频为空'
+  } catch (error) {
+    state.statusText = `添加采样失败：${(error as Error).message}`
+  } finally {
+    state.busy = false
+  }
+}
+
+/** 试听一个自定义音源采样（按原始音高原速播放） */
+export async function previewCustomSample(key: string): Promise<void> {
+  await ensureAudio()
+  engine.previewSample(key)
+}
+
+/** 打开 / 关闭自定义音源管理对话框 */
+export function openCustomSound(): void {
+  state.customSoundOpen = true
+}
+
+export function closeCustomSound(): void {
+  state.customSoundOpen = false
+}
+
 // ------------------------------------------------------------ 工程级设置
 
 export function setBpm(bpm: number): void {
@@ -1558,6 +1839,14 @@ export function previewAttack(trackId: string, midi: number, velocity = state.ke
 /** 屏幕键盘：抬起停止 */
 export function previewRelease(trackId: string, midi: number): void {
   engine.previewRelease(trackId, midi)
+}
+
+/**
+ * 写谱试听：新增音符 / 拖动改音高时立即响一下当前音色，
+ * 帮助确认写下的音高与音色。采用一次性触发，无需手动抬起。
+ */
+export function previewNote(trackId: string, midi: number, velocity = 0.85): void {
+  engine.previewNote(trackId, midi, velocity)
 }
 
 const pitchExpiry = new Map<number, number>()

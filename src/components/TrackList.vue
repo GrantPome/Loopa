@@ -7,11 +7,40 @@
 import { computed, ref } from 'vue'
 import type { InstrumentType } from '@/types'
 import { INSTRUMENT_OPTIONS } from '@/types'
-import { addAudioTrack, addTrack, importAudioFile, state, toggleVolumeDisplay } from '@/core/store'
+import {
+  addAudioTrack,
+  addTrack,
+  importAudioFile,
+  openCustomSound,
+  state,
+  toggleVolumeDisplay
+} from '@/core/store'
 import TrackRow from './TrackRow.vue'
 
-const newInstrument = ref<InstrumentType>('piano')
+/** 新增轨道时的音色选择：内置音色用类型名，自定义音色用 `custom:<id>` */
+const newInstrument = ref<string>('piano')
 const audioInput = ref<HTMLInputElement | null>(null)
+
+/** 「管理自定义音源」哨兵值 */
+const MANAGE_VALUE = '__manage__'
+
+/** 工程内的自定义音源 */
+const customInstruments = computed(() => state.project.customInstruments)
+
+/** 新增轨道：解析下拉框的值（内置音色 / 自定义音源 / 打开管理对话框） */
+function onAddTrack(): void {
+  const value = newInstrument.value
+  if (value === MANAGE_VALUE) {
+    openCustomSound()
+    newInstrument.value = 'piano'
+    return
+  }
+  if (value.startsWith('custom:')) {
+    addTrack('custom', value.slice('custom:'.length))
+    return
+  }
+  addTrack(value as InstrumentType)
+}
 
 const noteCount = computed(() =>
   state.project.tracks.reduce(
@@ -53,8 +82,14 @@ async function onAudioChange(event: Event): Promise<void> {
         <option v-for="option in INSTRUMENT_OPTIONS" :key="option.value" :value="option.value">
           {{ option.label }}
         </option>
+        <optgroup v-if="customInstruments.length" label="自定义音源">
+          <option v-for="ci in customInstruments" :key="ci.id" :value="`custom:${ci.id}`">
+            {{ ci.name }}（{{ ci.kind === 'drum' ? '鼓组' : '旋律' }}）
+          </option>
+        </optgroup>
+        <option :value="MANAGE_VALUE">管理自定义音源…</option>
       </select>
-      <button title="新增 MIDI 乐器轨道" @click="addTrack(newInstrument)">＋</button>
+      <button title="新增 MIDI 乐器轨道" @click="onAddTrack">＋</button>
     </div>
 
     <div class="head sub">

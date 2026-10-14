@@ -1,5 +1,5 @@
 import * as Tone from 'tone'
-import type { InstrumentType, MelodicInstrumentType } from '@/types'
+import type { CustomInstrumentKind, InstrumentType, MelodicInstrumentType } from '@/types'
 import { midiToNoteName } from '@/utils/music'
 
 /**
@@ -394,14 +394,174 @@ class DrumKit implements InstrumentNode {
   }
 }
 
-/** 工厂：按音色类型创建乐器节点（可在离线渲染上下文中复用） */
-export function createInstrument(type: InstrumentType): InstrumentNode {
+/** 采样器构建所需的单个采样：buffer 已解码，可直接送进 WebAudio */
+export interface ResolvedSample {
+  /** 采样绑定的目标音号（鼓组命中用） */
+  midi: number
+  /** 采样原始音高（旋律移调基准） */
+  rootMidi: number
+  /** 采样增益 0~2 */
+  gain: number
+  buffer: AudioBuffer
+}
+
+/** 采样器构建所需的完整音源 */
+export interface ResolvedCustomInstrument {
+  kind: CustomInstrumentKind
+  /** 整体增益 0~2 */
+  gain: number
+  samples: ResolvedSample[]
+}
+
+/** 把音名或音号统一换算成 MIDI 音号 */
+function toMidi(note: string | number): number {
+  return typeof note === 'number' ? note : Tone.Frequency(note).toMidi()
+}
+
+/** 按增益复制一份采样数据（避免污染共享缓存），gain === 1 时直接复用原 buffer */
+function scaledBuffer(buffer: AudioBuffer, gain: number): AudioBuffer {
+  if (gain === 1) return buffer
+  const out = new AudioBuffer({
+    numberOfChannels: buffer.numberOfChannels,
+    length: buffer.length,
+    sampleRate: buffer.sampleRate
+  })
+  for (let c = 0; c < buffer.numberOfChannels; c += 1) {
+    const src = buffer.getChannelData(c)
+    const dst = out.getChannelData(c)
+    for (let i = 0; i < src.length; i += 1) dst[i] = src[i] * gain
+  }
+  return out
+}
+
+/**
+ * 自定义音源乐器：
+ * - melodic：用 Tone.Sampler 承载，采样按原始音高注册，播放其它音高时自动移调
+ * - drum：每个采样绑定一个音号，命中即原速播放（不移调），未命中时退到最近的采样
+ *
+ * 旋律与鼓组共用统一的 InstrumentNode 接口，因此音频引擎无需区分。
+ */
+class SampledInstrument implements InstrumentNode {
+  readonly output: Tone.Gain
+  private kind: CustomInstrumentKind
+  private sampler: Tone.Sampler | null = null
+  /** 鼓组采样表（按音号升序，便于就近匹配） */
+  private drumSamples: { midi: number; gain: number; buffer: AudioBuffer }[] = []
+
+  constructor(spec: ResolvedCustomInstrument) {
+    this.output = new Tone.Gain(spec.gain)
+    this.kind = spec.kind
+
+    if (spec.kind === 'melodic') {
+      const urls: Record<string, AudioBuffer> = {}
+      for (const sample of spec.samples) {
+        // 以采样原始音高作为根音注册，播放其它音高时由 Sampler 自动重采样
+        urls[midiToNoteName(sample.rootMidi)] = scaledBuffer(sample.buffer, sample.gain)
+      }
+      if (Object.keys(urls).length > 0) {
+        const sampler = new Tone.Sampler({ urls, attack: 0.002, release: 0.35 })
+        sampler.connect(this.output)
+        this.sampler = sampler
+      }
+    } else {
+      this.drumSamples = spec.samples
+        .map((s) => ({ midi: s.midi, gain: s.gain, buffer: s.buffer }))
+        .sort((a, b) => a.midi - b.midi)
+    }
+  }
+
+  connect(dest: Tone.ToneAudioNode): void {
+    this.output.connect(dest)
+  }
+
+  triggerAttack(note: string | number, time?: number, velocity?: number): void {
+    const midi = toMidi(note)
+    if (this.kind === 'melodic') {
+      this.sampler?.triggerAttack(midiToNoteName(midi), time, velocity ?? 0.8)
+    } else {
+      this.playDrum(midi, time ?? Tone.now(), velocity ?? 0.85)
+    }
+  }
+
+  triggerRelease(note: string | number, time?: number): void {
+    if (this.kind !== 'melodic') return
+    this.sampler?.triggerRelease(midiToNoteName(toMidi(note)), time)
+  }
+
+  triggerAttackRelease(note: string | number, duration: number, time?: number, velocity?: number): void {
+    const midi = toMidi(note)
+    if (this.kind === 'melodic') {
+      this.sampler?.triggerAttackRelease(midiToNoteName(midi), duration, time, velocity ?? 0.8)
+    } else {
+      // 鼓组是单次触发乐器：忽略音符时长，让采样自然响完
+      this.playDrum(midi, time ?? Tone.now(), velocity ?? 0.85)
+    }
+  }
+
+  /** 鼓组单次触发：新建一次性 buffer source，播放结束即释放 */
+  private playDrum(midi: number, time: number, velocity: number): void {
+    const sample = this.pickDrumSample(midi)
+    if (!sample) return
+    const gain = sample.gain * velocity
+    if (gain <= 0.0005) return
+    // OneShotSource 本身没有音量参数，这里串一个独立的 Gain 控制力度
+    const amp = new Tone.Gain(gain)
+    const source = new Tone.ToneBufferSource({
+      url: sample.buffer,
+      fadeIn: 0.002,
+      fadeOut: 0.02
+    })
+    source.connect(amp)
+    amp.connect(this.output)
+    source.start(time)
+    source.onended = () => {
+      source.dispose()
+      amp.dispose()
+    }
+  }
+
+  /** 就近选取采样：优先精确命中音号，否则退到最接近的一个 */
+  private pickDrumSample(midi: number): { midi: number; gain: number; buffer: AudioBuffer } | null {
+    if (this.drumSamples.length === 0) return null
+    let best = this.drumSamples[0]
+    let bestDiff = Math.abs(best.midi - midi)
+    for (const sample of this.drumSamples) {
+      const diff = Math.abs(sample.midi - midi)
+      if (diff < bestDiff) {
+        best = sample
+        bestDiff = diff
+      }
+    }
+    return best
+  }
+
+  dispose(): void {
+    this.sampler?.dispose()
+    this.output.dispose()
+  }
+}
+
+/**
+ * 工厂：按音色类型创建乐器节点（可在离线渲染上下文中复用）。
+ * custom 音色需要传入已解析的采样数据；未提供或采样为空时得到一个静音乐器。
+ */
+export function createInstrument(
+  type: InstrumentType,
+  custom?: ResolvedCustomInstrument | null
+): InstrumentNode {
   if (type === 'drums') return new DrumKit('acoustic')
   if (type === 'electroDrums') return new DrumKit('electronic')
+  if (type === 'custom') {
+    return new SampledInstrument(custom ?? { kind: 'melodic', gain: 1, samples: [] })
+  }
   return new MelodicInstrument(type)
 }
 
-/** 判断是否为鼓组（鼓组用 MIDI 音号，旋律用音名） */
-export function isDrumTrack(type: InstrumentType): boolean {
-  return type === 'drums' || type === 'electroDrums'
+/**
+ * 判断是否为鼓组（鼓组用 MIDI 音号，旋律用音名）。
+ * 自定义音源按 kind 判定：drum 走音号，melodic 走音名。
+ */
+export function isDrumTrack(type: InstrumentType, customKind?: CustomInstrumentKind): boolean {
+  if (type === 'drums' || type === 'electroDrums') return true
+  return type === 'custom' && customKind === 'drum'
 }

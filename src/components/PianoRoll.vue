@@ -24,6 +24,7 @@ import {
   nudgeTargetVelocity,
   pasteNotes,
   previewAttack,
+  previewNote,
   quantizeSelected,
   removeNotes,
   scaleTargetVelocity,
@@ -275,6 +276,23 @@ const rowHeight = computed(() => state.view.rowHeight)
 const track = computed(() => activeTrack())
 const region = computed(() => activeRegion())
 const trackColor = computed(() => track.value?.color ?? '#4f9df7')
+
+/**
+ * 当前轨道是否按鼓组音区展示：
+ * 内置鼓组直接判定，自定义音源按其 kind（drum / melodic）判定，
+ * 鼓组音号集中在低音区，切换轨道时需要自动把音高窗口下调。
+ */
+const drumLike = computed(() => {
+  const current = track.value
+  if (!current) return false
+  if (current.instrument === 'drums' || current.instrument === 'electroDrums') return true
+  if (current.instrument === 'custom') {
+    const custom = state.project.customInstruments.find((c) => c.id === current.customInstrumentId)
+    return custom?.kind === 'drum'
+  }
+  return false
+})
+
 const totalBeats = computed(() => state.project.bars * beatsPerBarOf(state.project.timeSignature))
 const totalWidth = computed(() => Math.max(200, totalBeats.value * state.view.pxPerBeat))
 const noteCount = computed(() => region.value?.notes.length ?? 0)
@@ -316,6 +334,22 @@ const drag: {
   moved: false,
   marquee: null,
   pendingTarget: 'move'
+}
+
+/**
+ * 上一次写谱试听的音高。
+ * 拖动音符改音高时，只有音高真正变化才再次发声，避免连续拖拽时声音糊成一片。
+ */
+let lastPreviewMidi: number | null = null
+
+/**
+ * 写谱试听：写下音符或把音符拖到新音高时，立即响一下当前轨道的音色，
+ * 帮助确认写的是什么音。属于「一次性」试听，不需要手动抬起。
+ */
+function previewWritten(midi: number, velocity: number): void {
+  const trackId = state.selectedTrackId
+  if (!trackId) return
+  previewNote(trackId, midi, velocity)
 }
 
 // ---------------------------------------------------------------- 绘制工具
@@ -1006,6 +1040,7 @@ function onPointerDown(event: PointerEvent): void {
   }
 
   drag.moved = false
+  lastPreviewMidi = null
   attachListeners()
   requestDraw()
 }
@@ -1051,6 +1086,9 @@ function onPointerMove(event: PointerEvent): void {
         const note = addNote(midi, start, state.snapDivision)
         if (note) {
           setNoteSelection([note.id])
+          // 写下音符时立即试听，确认音高与音色
+          previewWritten(note.midi, note.velocity)
+          lastPreviewMidi = note.midi
           drag.mode = 'create'
           drag.snapshots = [{ id: note.id, start: note.start, duration: note.duration, midi: note.midi }]
         } else {
@@ -1119,6 +1157,15 @@ function onPointerMove(event: PointerEvent): void {
       note.duration = roundBeat(end - snapshot.start)
     }
   }
+  // 拖动改音高时试听：以主音符（第一个被拖的音符）为准，
+  // 只在音高真正变化时发声，避免连续拖动时声音糊成一片
+  if (drag.mode === 'move') {
+    const primary = active.notes.find((n) => n.id === drag.snapshots[0]?.id)
+    if (primary && primary.midi !== lastPreviewMidi) {
+      lastPreviewMidi = primary.midi
+      previewWritten(primary.midi, primary.velocity)
+    }
+  }
   ensureBarsForBeat(maxNoteEnd())
   requestDraw()
 }
@@ -1152,6 +1199,8 @@ function onPointerUp(event?: PointerEvent): void {
       const note = addNote(midi, start, state.snapDivision)
       if (note) {
         setNoteSelection([note.id])
+        // 原地点击写下音符时也立即试听
+        previewWritten(note.midi, note.velocity)
         commit()
       }
     }
@@ -1357,12 +1406,11 @@ watch([hintOpen, hintHover], () => {
   if (hintOpen.value || hintHover.value) nextTick(positionHint)
 })
 
-// 切换轨道时自动调整音高窗口（鼓组音区较低）
+// 切换轨道（或轨道音色变化）时自动调整音高窗口（鼓组音区较低）
 watch(
-  () => state.selectedTrackId,
+  () => [state.selectedTrackId, drumLike.value],
   () => {
-    const current = track.value
-    if (current?.instrument === 'drums') topMidi.value = 52
+    if (drumLike.value) topMidi.value = 52
     else if (topMidi.value <= 52) topMidi.value = 84
     requestDraw()
   }

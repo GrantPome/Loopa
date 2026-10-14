@@ -7,13 +7,16 @@
  *
  * 时间基准：内部 1 拍 = 四分音符，导出使用 PPQ=480 的 ticks 表示。
  */
-import type { InstrumentType, Note, Project, TimeSignature } from '@/types'
+import type { InstrumentType, Note, Project, TimeSignature, Track } from '@/types'
 import { clamp, uid } from '@/utils/music'
 
 /** 导出使用的每四分音符 tick 数 */
 const EXPORT_PPQ = 480
 
-/** 音色 → GM 音色号（用于导出 Program Change） */
+/**
+ * 音色 → GM 音色号（用于导出 Program Change）。
+ * 自定义音源没有对应的 GM 音色，导出时统一退回钢琴（0）。
+ */
 const GM_PROGRAM: Record<InstrumentType, number> = {
   piano: 0,
   electricPiano: 4,
@@ -27,7 +30,8 @@ const GM_PROGRAM: Record<InstrumentType, number> = {
   pad: 89,
   synthLead: 80,
   drums: 0,
-  electroDrums: 0
+  electroDrums: 0,
+  custom: 0
 }
 
 /** GM 音色号 → 内置音色（按音色族粗略归并） */
@@ -50,6 +54,19 @@ const SUPPORTED_TS: TimeSignature[] = ['2/4', '3/4', '4/4', '5/4', '6/8', '7/8',
 
 function isDrumInstrument(instrument: InstrumentType): boolean {
   return instrument === 'drums' || instrument === 'electroDrums'
+}
+
+/**
+ * 导出时判断轨道是否走鼓组通道（MIDI 通道 10 / 索引 9）。
+ * 自定义音源按其 kind 判定：drum 走鼓组通道，melodic 走普通通道。
+ */
+function isDrumTrackForExport(track: Track, project: Project): boolean {
+  if (isDrumInstrument(track.instrument)) return true
+  if (track.instrument === 'custom') {
+    const custom = project.customInstruments?.find((c) => c.id === track.customInstrumentId)
+    return custom?.kind === 'drum'
+  }
+  return false
 }
 
 // ---------------------------------------------------------------- 导出
@@ -130,7 +147,7 @@ export function projectToMidi(project: Project): Blob {
 
   for (const track of project.tracks) {
     if (track.kind === 'audio') continue
-    const drum = isDrumInstrument(track.instrument)
+    const drum = isDrumTrackForExport(track, project)
     const channel = drum ? 9 : 0
     const events: RawEvent[] = [{ tick: 0, data: [0xff, 0x03, ...lenPrefixed(utf8(track.name))] }]
 

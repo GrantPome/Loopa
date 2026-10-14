@@ -6,9 +6,9 @@ import {
   midiToNoteName,
   timeSignatureParts
 } from '@/utils/music'
-import { createInstrument, isDrumTrack, type InstrumentNode } from './instruments'
+import { createInstrument, isDrumTrack, type InstrumentNode, type ResolvedCustomInstrument, type ResolvedSample } from './instruments'
 import { buildEffectChain, disposeEffectChain, type EffectChainItem } from './effects'
-import { getCachedPcm, type PcmData } from './audioStore'
+import { getCachedPcm, hasCachedPcm, pcmToAudioBuffer } from './audioStore'
 
 /**
  * 计算轨道的实际线性增益：
@@ -35,6 +35,15 @@ interface Channel {
   id: string
   kind: Track['kind']
   instrumentType: Track['instrument']
+  /** 自定义音源 id（仅 instrument === 'custom' 时有效） */
+  customInstrumentId: string
+  /**
+   * 乐器签名：类型 / 自定义音源 id / 采样映射 / 采样是否已加载。
+   * 任一变化都需要重建通道，保证新增采样后能立即发声。
+   */
+  instrumentSignature: string
+  /** 是否按 MIDI 音号触发（鼓组为 true，旋律为 false） */
+  drum: boolean
   /** MIDI 轨的合成器；音频轨为 null */
   instrument: InstrumentNode | null
   /** 统一信号入口 */
@@ -59,6 +68,23 @@ const EQ3_KEYS: Record<EqBand, 'low' | 'mid' | 'high'> = {
 /** 效果器链结构签名：只有 id / 类型 / 启用状态变化才需要重建链路 */
 function effectSignature(effects: TrackEffect[]): string {
   return effects.map((e) => `${e.id}:${e.type}:${e.enabled ? 1 : 0}`).join('|')
+}
+
+/**
+ * 轨道乐器签名：
+ * 内置音色直接取类型名；自定义音源把音源 id、类型、整体增益、
+ * 每个采样的映射关系与「是否已加载进内存缓存」一并纳入，
+ * 因此新增 / 删除采样、调整音号或采样完成预热都会触发通道重建。
+ */
+function instrumentSignature(track: Track, project: Project): string {
+  if (track.kind !== 'midi') return ''
+  if (track.instrument !== 'custom') return track.instrument
+  const custom = project.customInstruments?.find((c) => c.id === track.customInstrumentId)
+  if (!custom) return 'custom:missing'
+  const parts = custom.samples.map(
+    (s) => `${s.key}/${s.midi}/${s.rootMidi}/${s.gain}/${hasCachedPcm(s.key) ? 1 : 0}`
+  )
+  return `custom:${custom.id}:${custom.kind}:${custom.gain}:${parts.join(',')}`
 }
 
 /**
@@ -187,18 +213,18 @@ class AudioEngine {
 
     for (const track of project.tracks) {
       let channel = this.channels.get(track.id)
-      // 轨道类型变化、或 MIDI 轨换音色 → 整个通道重建
+      // 轨道类型变化、或 MIDI 轨的乐器（含自定义音源采样）变化 → 整个通道重建
       const needsRebuild =
         channel !== undefined &&
         (channel.kind !== track.kind ||
-          (track.kind === 'midi' && channel.instrumentType !== track.instrument))
+          (track.kind === 'midi' && channel.instrumentSignature !== instrumentSignature(track, project)))
       if (needsRebuild && channel) {
         this.disposeChannel(channel)
         this.channels.delete(track.id)
         channel = undefined
       }
       if (!channel) {
-        channel = this.createChannel(track)
+        channel = this.createChannel(track, project)
         this.channels.set(track.id, channel)
       } else if (effectSignature(track.effects) !== channel.effectSignature) {
         this.rebuildEffects(channel, track)
@@ -208,7 +234,7 @@ class AudioEngine {
   }
 
   /** 建立单条轨道的完整信号链 */
-  private createChannel(track: Track): Channel {
+  private createChannel(track: Track, project: Project): Channel {
     const gain = new Tone.Gain(1)
     gain.connect(this.dryBus)
 
@@ -227,10 +253,15 @@ class AudioEngine {
 
     const entry = new Tone.Gain(1)
     const effects = buildEffectChain(track.effects)
+    const custom = track.instrument === 'custom' ? this.resolveCustomInstrument(project, track.customInstrumentId) : null
+    const customKind = project.customInstruments?.find((c) => c.id === track.customInstrumentId)?.kind
     const channel: Channel = {
       id: track.id,
       kind: track.kind,
       instrumentType: track.instrument,
+      customInstrumentId: track.customInstrumentId,
+      instrumentSignature: instrumentSignature(track, project),
+      drum: isDrumTrack(track.instrument, customKind),
       instrument: null,
       entry,
       effects,
@@ -244,12 +275,29 @@ class AudioEngine {
     this.connectChain(channel)
 
     if (track.kind === 'midi') {
-      const instrument = createInstrument(track.instrument)
+      const instrument = createInstrument(track.instrument, custom)
       instrument.connect(entry)
       channel.instrument = instrument
     }
 
     return channel
+  }
+
+  /**
+   * 解析自定义音源：从内存缓存里取出各采样的 AudioBuffer。
+   * 采样尚未预热完成时返回 null，此时乐器静音，等签名变化后会自动重建。
+   */
+  private resolveCustomInstrument(project: Project, id: string): ResolvedCustomInstrument | null {
+    const custom = project.customInstruments?.find((c) => c.id === id)
+    if (!custom || custom.samples.length === 0) return null
+    const samples: ResolvedSample[] = []
+    for (const sample of custom.samples) {
+      const buffer = this.clipBuffer(sample.key)
+      if (!buffer) continue
+      samples.push({ midi: sample.midi, rootMidi: sample.rootMidi, gain: sample.gain, buffer })
+    }
+    if (samples.length === 0) return null
+    return { kind: custom.kind, gain: custom.gain, samples }
   }
 
   /** 把入口 → 效果器链 → 均衡串起来 */
@@ -391,7 +439,7 @@ class AudioEngine {
         continue
       }
 
-      const drum = isDrumTrack(track.instrument)
+      const drum = channel.drum
       for (const region of track.regions) {
         for (const note of region.notes) {
           const at = beatsToTicks(region.start + note.start, ppq)
@@ -609,7 +657,7 @@ class AudioEngine {
     const channel = this.channels.get(trackId)
     if (!channel || !channel.instrument) return
     const now = Tone.getContext().currentTime
-    if (isDrumTrack(channel.instrumentType)) channel.instrument.triggerAttack(midi, now, velocity)
+    if (channel.drum) channel.instrument.triggerAttack(midi, now, velocity)
     else channel.instrument.triggerAttack(midiToNoteName(midi), now, velocity)
   }
 
@@ -617,8 +665,32 @@ class AudioEngine {
     const channel = this.channels.get(trackId)
     if (!channel || !channel.instrument) return
     const now = Tone.getContext().currentTime
-    if (isDrumTrack(channel.instrumentType)) channel.instrument.triggerRelease(midi, now)
+    if (channel.drum) channel.instrument.triggerRelease(midi, now)
     else channel.instrument.triggerRelease(midiToNoteName(midi), now)
+  }
+
+  /**
+   * 一次性试听（写谱时使用）：直接触发 attack + release。
+   * 与虚拟键盘的 previewAttack 不同，这里不需要等待手动抬起，
+   * 避免写下音符后声音一直挂着不释放。
+   */
+  previewNote(trackId: string, midi: number, velocity = 0.85): void {
+    const channel = this.channels.get(trackId)
+    if (!channel || !channel.instrument) return
+    const now = Tone.getContext().currentTime
+    if (channel.drum) channel.instrument.triggerAttackRelease(midi, 0.45, now, velocity)
+    else channel.instrument.triggerAttackRelease(midiToNoteName(midi), 0.45, now, velocity)
+  }
+
+  /** 试听一个自定义音源采样（按原始音高原速播放） */
+  previewSample(key: string): void {
+    if (!this.graphReady) return
+    const buffer = this.clipBuffer(key)
+    if (!buffer) return
+    const player = new Tone.Player(buffer)
+    player.connect(this.dryBus)
+    player.onstop = () => player.dispose()
+    player.start(Tone.now())
   }
 
   /** 试听一段音频片段（波形编辑器里点击片段头部播放） */
@@ -669,6 +741,8 @@ class AudioEngine {
       /** 每条轨道的统一入口（合成器 / 片段播放器都汇入这里） */
       const entries = new Map<string, Tone.Gain>()
       const instruments = new Map<string, InstrumentNode>()
+      /** 每条轨道是否按音号触发（鼓组），与实时链路保持一致 */
+      const channelDrumMap = new Map<string, boolean>()
 
       for (const track of project.tracks) {
         const gain = new Tone.Gain(computeTrackGain(track, project.tracks))
@@ -699,9 +773,17 @@ class AudioEngine {
         node.connect(eq)
 
         if (track.kind === 'midi') {
-          const instrument = createInstrument(track.instrument)
+          const custom =
+            track.instrument === 'custom'
+              ? this.resolveCustomInstrument(project, track.customInstrumentId)
+              : null
+          const customKind = project.customInstruments?.find(
+            (c) => c.id === track.customInstrumentId
+          )?.kind
+          const instrument = createInstrument(track.instrument, custom)
           instrument.connect(entry)
           instruments.set(track.id, instrument)
+          channelDrumMap.set(track.id, isDrumTrack(track.instrument, customKind))
         }
       }
 
@@ -732,7 +814,7 @@ class AudioEngine {
 
         const instrument = instruments.get(track.id)
         if (!instrument) continue
-        const drum = isDrumTrack(track.instrument)
+        const drum = channelDrumMap.get(track.id) ?? false
         for (const region of track.regions) {
           for (const note of region.notes) {
             const at = beatsToTicks(region.start + note.start, transport.PPQ)
@@ -754,21 +836,6 @@ class AudioEngine {
     if (!audioBuffer) throw new Error('离线渲染失败：未得到音频数据')
     return audioBuffer
   }
-}
-
-/** 把 PCM 采样打包成 AudioBuffer（WebAudio 的通用数据容器） */
-function pcmToAudioBuffer(pcm: PcmData): AudioBuffer {
-  const channelCount = pcm.channels.length
-  const length = pcm.channels[0]?.length ?? 0
-  const buffer = new AudioBuffer({
-    numberOfChannels: Math.max(1, channelCount),
-    length: Math.max(1, length),
-    sampleRate: pcm.sampleRate
-  })
-  for (let c = 0; c < channelCount; c += 1) {
-    buffer.getChannelData(c).set(pcm.channels[c])
-  }
-  return buffer
 }
 
 /** 读取电平表数值并归一化到 0~1（normalRange 模式下已是 0~1，这里再做一次保护） */
