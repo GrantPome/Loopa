@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://grantpome.github.io/muisc-editor/"><b>▶ 在线体验</b></a>
+  <a href="https://grantpome.github.io/TonePome/"><b>▶ 在线体验</b></a>
 </p>
 
 ---
@@ -169,9 +169,9 @@ src/
 
 项目已配置 GitHub Actions，推送到 `main` 分支后会自动完成「类型检查 → 构建 → 发布到 GitHub Pages」。
 
-线上地址：<https://grantpome.github.io/muisc-editor/>
+线上地址：<https://grantpome.github.io/TonePome/>
 
-构建时 `vite.config.ts` 会自动带上 `/muisc-editor/` 子路径前缀以适配项目页部署，本地开发与预览仍使用根路径。
+构建时 `vite.config.ts` 会自动带上 `/TonePome/` 子路径前缀以适配项目页部署，本地开发与预览仍使用根路径。
 
 ## 浏览器要求
 

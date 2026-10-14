@@ -4,9 +4,9 @@ import { fileURLToPath, URL } from 'node:url'
 
 // Vite 配置：纯前端工程，无后端代理
 export default defineConfig(({ command }) => ({
-  // GitHub Pages 项目页部署在 https://<user>.github.io/muisc-editor/ 子路径下，
+  // GitHub Pages 项目页部署在 https://<user>.github.io/TonePome/ 子路径下，
   // 因此构建产物必须带该前缀；本地 dev / preview 仍使用根路径，避免访问时多一层目录
-  base: command === 'build' ? '/muisc-editor/' : '/',
+  base: command === 'build' ? '/TonePome/' : '/',
   plugins: [vue()],
   resolve: {
     alias: {
