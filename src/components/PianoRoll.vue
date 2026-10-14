@@ -37,6 +37,7 @@ import {
   pasteNotes,
   previewAttack,
   previewNote,
+  previewRelease,
   quantizeSelected,
   quantizeSelectedToScale,
   removeAutomationPoint,
@@ -1646,14 +1647,90 @@ function onQuantize(): void {
   requestDraw()
 }
 
-/** 点击琴键列试听音高 */
+// ---------------------------------------------------------------- 琴键列试听（支持按住滑奏）
+
+/** 按下琴键的指针 id，用于过滤多指操作 */
+let keysPointerId: number | null = null
+/** 当前正在发声的音高（null 表示未发声） */
+let keysHeldMidi: number | null = null
+/** 本次演奏所绑定的轨道 id */
+let keysTrackId = ''
+
+/**
+ * 由指针纵坐标换算音高。
+ * 仅在琴键列的纵向范围内有效：拖出范围返回 null 表示应当静音，
+ * 这样滑出键盘就自然停声，而不是卡在边缘键上一直响。
+ */
+function midiAtKeysPointer(event: PointerEvent): number | null {
+  const canvas = keysEl.value
+  if (!canvas) return null
+  const rect = canvas.getBoundingClientRect()
+  if (event.clientY < rect.top || event.clientY > rect.bottom) return null
+  return clamp(
+    topMidi.value - Math.floor((event.clientY - rect.top) / rowHeight.value),
+    MIN_MIDI,
+    MAX_MIDI
+  )
+}
+
+/** 释放当前发声的音符：抬手、滑奏换音、指针移出琴键都会用到 */
+function releaseKeysNote(): void {
+  if (keysHeldMidi === null) return
+  if (keysTrackId) previewRelease(keysTrackId, keysHeldMidi)
+  keysHeldMidi = null
+}
+
+/** 切换到指定音高；音高未变则不动，避免重复触发 */
+function playKeysNote(midi: number | null): void {
+  if (midi === keysHeldMidi) return
+  releaseKeysNote()
+  if (midi === null || !keysTrackId) return
+  previewAttack(keysTrackId, midi)
+  keysHeldMidi = midi
+}
+
+function onKeysPointerMove(event: PointerEvent): void {
+  if (event.pointerId !== keysPointerId) return
+  playKeysNote(midiAtKeysPointer(event))
+}
+
+/** 结束本次演奏：释放音符并摘掉全局监听 */
+function endKeysAudition(): void {
+  keysPointerId = null
+  releaseKeysNote()
+  keysTrackId = ''
+  window.removeEventListener('pointermove', onKeysPointerMove)
+  window.removeEventListener('pointerup', onKeysPointerUp)
+  window.removeEventListener('pointercancel', onKeysPointerUp)
+  window.removeEventListener('blur', endKeysAudition)
+}
+
+function onKeysPointerUp(event: PointerEvent): void {
+  if (event.pointerId !== keysPointerId) return
+  endKeysAudition()
+}
+
+/** 按下琴键试听音高；按住拖动即可连续滑奏 */
 function onKeysPointerDown(event: PointerEvent): void {
   const canvas = keysEl.value
-  if (!canvas) return
-  const rect = canvas.getBoundingClientRect()
-  const midi = clamp(topMidi.value - Math.floor((event.clientY - rect.top) / rowHeight.value), MIN_MIDI, MAX_MIDI)
   const trackId = state.selectedTrackId
-  if (trackId) previewAttack(trackId, midi)
+  if (!canvas || !trackId || event.button !== 0) return
+  // 上一次演奏未正常收尾（如窗口失焦）时先清理，避免两个音叠着不释放
+  if (keysPointerId !== null) endKeysAudition()
+  keysPointerId = event.pointerId
+  keysTrackId = trackId
+  // 先挂监听再捕获指针：捕获失败也不会漏掉抬手事件，避免音符一直挂着
+  window.addEventListener('pointermove', onKeysPointerMove)
+  window.addEventListener('pointerup', onKeysPointerUp)
+  window.addEventListener('pointercancel', onKeysPointerUp)
+  window.addEventListener('blur', endKeysAudition)
+  // 捕获指针：拖出琴键列后仍能收到 pointermove，滑奏不会中断
+  try {
+    canvas.setPointerCapture(event.pointerId)
+  } catch {
+    /* 某些环境（如合成事件）不支持指针捕获，退化为普通拖动即可 */
+  }
+  playKeysNote(midiAtKeysPointer(event))
 }
 
 // ---------------------------------------------------------------- 生命周期
@@ -1675,6 +1752,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   cancelAnimationFrame(rafId)
   detachListeners()
+  // 组件卸载时收尾：避免按住琴键切走视图后音符一直挂着
+  endKeysAudition()
   window.removeEventListener('pointermove', onLanePointerMove)
   window.removeEventListener('pointerup', onLanePointerUp)
   window.removeEventListener('pointercancel', onLanePointerUp)
