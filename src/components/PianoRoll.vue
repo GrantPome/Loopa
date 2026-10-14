@@ -6,6 +6,7 @@
  * - 只绘制视口内的行与音符，保证大量音符时依然流畅
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue'
+import DropdownMenu from './DropdownMenu.vue'
 import type { AutomationPoint, GridDivision, Note } from '@/types'
 import {
   AUTOMATION_PARAMS,
@@ -84,6 +85,9 @@ const hintBtnEl = ref<HTMLButtonElement | null>(null)
 const hintPopEl = ref<HTMLDivElement | null>(null)
 /** 弹层在视口中的坐标（position: fixed） */
 const hintPos = ref({ x: 0, y: 0 })
+
+/** 「音阶」下拉的组件引用：用于在执行一次性操作后收起面板 */
+const scaleMenuEl = ref<InstanceType<typeof DropdownMenu> | null>(null)
 
 function toggleHint(): void {
   hintOpen.value = !hintOpen.value
@@ -1016,6 +1020,25 @@ function onQuantizeToScale(): void {
   requestDraw()
 }
 
+/** 下拉里的一次性操作：执行完顺手收起面板，避免面板挡住网格 */
+function onQuantizeToScaleFromMenu(): void {
+  onQuantizeToScale()
+  scaleMenuEl.value?.close()
+}
+
+/** 当前音阶的显示名（根音 + 类型），直接呈现在「音阶」下拉触发器上 */
+const scaleLabel = computed(() => {
+  const root = SCALE_ROOT_OPTIONS.find((opt) => opt.value === state.project.scale.root)?.label ?? 'C'
+  const def = SCALE_DEFS.find((item) => item.type === state.project.scale.type)
+  // 十二平均律表示「不锁定」，触发器上只留根音，避免文字过长挤压工具栏
+  return state.project.scale.type === 'chromatic' ? root : `${root} ${def?.label ?? ''}`.trim()
+})
+
+/** 「显示」组内是否有任一开关处于打开状态：用于让下拉触发器显示激活态 */
+const anyDisplayOn = computed(
+  () => state.velocityLaneOn || state.automationLaneOn || state.noteColorByVelocity
+)
+
 /** 自动化条拖拽状态 */
 const autoDrag: { active: boolean; pointId: string } = { active: false, pointId: '' }
 
@@ -1740,63 +1763,91 @@ watch(
         </button>
       </div>
 
-      <!-- 显示：底部编辑条与着色开关 -->
+      <!-- 显示：底部编辑条与着色开关，收进下拉避免平铺一排 -->
       <div class="pr-group">
-        <span class="group-label">显示</span>
-        <button
-          :class="{ active: state.velocityLaneOn }"
-          title="展开 / 收起底部力度编辑条"
-          @click="toggleVelocityLane"
+        <DropdownMenu
+          label="显示"
+          :width="212"
+          :active="anyDisplayOn"
+          title="显示选项：力度条 / 包络 / 力度着色"
         >
-          力度条
-        </button>
-        <button
-          :class="{ active: state.automationLaneOn }"
-          title="展开 / 收起底部自动化包络编辑条"
-          @click="toggleAutomationLane"
-        >
-          包络
-        </button>
-        <button
-          :class="{ active: state.noteColorByVelocity }"
-          title="按力度给音符着色（冷色弱、暖色强）"
-          @click="toggleNoteColor"
-        >
-          力度着色
-        </button>
+          <button
+            class="dd-item"
+            :class="{ on: state.velocityLaneOn }"
+            title="展开 / 收起底部力度编辑条"
+            @click="toggleVelocityLane"
+          >
+            <span class="dd-check">{{ state.velocityLaneOn ? '✓' : '' }}</span>
+            <span class="dd-name">力度条</span>
+            <span class="dd-desc">底部力度编辑条</span>
+          </button>
+          <button
+            class="dd-item"
+            :class="{ on: state.automationLaneOn }"
+            title="展开 / 收起底部自动化包络编辑条"
+            @click="toggleAutomationLane"
+          >
+            <span class="dd-check">{{ state.automationLaneOn ? '✓' : '' }}</span>
+            <span class="dd-name">包络</span>
+            <span class="dd-desc">自动化包络编辑条</span>
+          </button>
+          <button
+            class="dd-item"
+            :class="{ on: state.noteColorByVelocity }"
+            title="按力度给音符着色（冷色弱、暖色强）"
+            @click="toggleNoteColor"
+          >
+            <span class="dd-check">{{ state.noteColorByVelocity ? '✓' : '' }}</span>
+            <span class="dd-name">力度着色</span>
+            <span class="dd-desc">按力度给音符上色</span>
+          </button>
+        </DropdownMenu>
       </div>
 
-      <!-- 音阶：锁定与量化到音阶 -->
+      <!-- 音阶：类型、根音、锁定与量化，收进下拉，触发器上直接显示当前音阶 -->
       <div class="pr-group">
-        <span class="group-label">音阶</span>
-        <label class="field">
-          音阶
-          <select :value="state.project.scale.type" @change="onScaleTypeChange">
-            <option v-for="def in SCALE_DEFS" :key="def.type" :value="def.type">{{ def.label }}</option>
-          </select>
-        </label>
-        <label class="field">
-          根音
-          <select :value="state.project.scale.root" @change="onScaleRootChange">
-            <option v-for="opt in SCALE_ROOT_OPTIONS" :key="opt.value" :value="opt.value">
-              {{ opt.label }}
-            </option>
-          </select>
-        </label>
-        <button
-          :class="{ active: state.scaleLockOn }"
-          title="开启后，新增与拖动音符都会吸附到所选音阶"
-          @click="toggleScaleLock"
+        <DropdownMenu
+          ref="scaleMenuEl"
+          :label="'音阶 · ' + scaleLabel"
+          :width="236"
+          :active="state.scaleLockOn"
+          title="音阶设置：类型 / 根音 / 锁定与吸附"
         >
-          锁定
-        </button>
-        <button
-          :disabled="state.selectedNoteIds.length === 0"
-          title="把选中音符的错音吸附到当前音阶"
-          @click="onQuantizeToScale"
-        >
-          吸附音阶
-        </button>
+          <div class="dd-row">
+            <span class="dd-row-label">类型</span>
+            <select :value="state.project.scale.type" @change="onScaleTypeChange">
+              <option v-for="def in SCALE_DEFS" :key="def.type" :value="def.type">{{ def.label }}</option>
+            </select>
+          </div>
+          <div class="dd-row">
+            <span class="dd-row-label">根音</span>
+            <select :value="state.project.scale.root" @change="onScaleRootChange">
+              <option v-for="opt in SCALE_ROOT_OPTIONS" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </option>
+            </select>
+          </div>
+          <button
+            class="dd-item"
+            :class="{ on: state.scaleLockOn }"
+            title="开启后，新增与拖动音符都会吸附到所选音阶"
+            @click="toggleScaleLock"
+          >
+            <span class="dd-check">{{ state.scaleLockOn ? '✓' : '' }}</span>
+            <span class="dd-name">锁定音阶</span>
+            <span class="dd-desc">新增与拖动自动吸附</span>
+          </button>
+          <button
+            class="dd-item"
+            :disabled="state.selectedNoteIds.length === 0"
+            title="把选中音符的错音吸附到当前音阶"
+            @click="onQuantizeToScaleFromMenu"
+          >
+            <span class="dd-check">→</span>
+            <span class="dd-name">吸附所选到音阶</span>
+            <span class="dd-desc">把错音拉回音阶</span>
+          </button>
+        </DropdownMenu>
       </div>
 
       <span class="gap" />
@@ -2042,6 +2093,81 @@ watch(
   color: var(--text-dim);
   font-size: 11px;
   letter-spacing: 0.06em;
+}
+
+/* ---- 下拉面板内的条目 ----
+ * 这些是 DropdownMenu 插槽里的内容，编译在本组件作用域内，因此样式写在这里。
+ */
+.dd-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  /* 面板内的条目按「列表项」呈现：去掉全局按钮的底色与描边，只留悬停高亮 */
+  min-height: 0;
+  background: transparent;
+  border: 0;
+  padding: 5px 6px;
+  border-radius: var(--radius);
+  text-align: left;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.dd-item:hover:not(:disabled) {
+  background: var(--panel-hover);
+}
+
+.dd-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 已开启的开关项：勾选符号与文字统一用强调色 */
+.dd-item.on,
+.dd-item.on .dd-check {
+  color: var(--accent);
+}
+
+.dd-check {
+  flex: 0 0 12px;
+  width: 12px;
+  text-align: center;
+  color: var(--accent);
+}
+
+.dd-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.dd-desc {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.dd-item.on .dd-desc {
+  color: var(--text-dim);
+}
+
+/* 带标签的一行（音阶类型 / 根音下拉） */
+.dd-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+}
+
+.dd-row-label {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.dd-row select {
+  flex: 1;
+  min-width: 0;
 }
 
 .chip {
