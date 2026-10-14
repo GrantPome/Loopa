@@ -1,14 +1,15 @@
 <script setup lang="ts">
 /**
  * 左侧轨道面板
- * - 新增 MIDI 乐器轨 / 新增音频轨 / 导入音频文件
- * - 轨道列表（MIDI 与音频轨混排，由 TrackRow 自行区分展示）
+ * - 新增 MIDI 乐器轨 / 新增音频轨 / 新增编组轨 / 导入音频文件
+ * - 轨道树展示：编组轨在前、子轨缩进紧随其后（MIDI / 音频 / 编组由 TrackRow 区分展示）
  */
 import { computed, ref } from 'vue'
-import type { InstrumentType } from '@/types'
+import type { InstrumentType, Track } from '@/types'
 import { INSTRUMENT_OPTIONS } from '@/types'
 import {
   addAudioTrack,
+  addGroupTrack,
   addTrack,
   importAudioFile,
   openInstrumentManager,
@@ -51,6 +52,36 @@ const noteCount = computed(() =>
 const clipCount = computed(() =>
   state.project.tracks.reduce((sum, track) => sum + track.clips.length, 0)
 )
+
+/**
+ * 轨道树展平结果：编组在前、其子轨紧随其后并缩进一级。
+ * 这里只做展示排序，不改变工程里的轨道顺序（顺序仍由 moveTrack 维护）。
+ */
+const rows = computed<{ track: Track; depth: number }[]>(() => {
+  const tracks = state.project.tracks
+  const byId = new Map(tracks.map((t) => [t.id, t]))
+  const childrenOf = new Map<string, Track[]>()
+  const roots: Track[] = []
+  for (const track of tracks) {
+    // 父级必须是一条真实存在的编组轨，否则视为根轨
+    const parent = track.parentId ? byId.get(track.parentId) : undefined
+    const pid = parent && parent.kind === 'group' ? parent.id : ''
+    if (pid) {
+      const list = childrenOf.get(pid)
+      if (list) list.push(track)
+      else childrenOf.set(pid, [track])
+    } else {
+      roots.push(track)
+    }
+  }
+  const out: { track: Track; depth: number }[] = []
+  const visit = (track: Track, depth: number): void => {
+    out.push({ track, depth })
+    for (const child of childrenOf.get(track.id) ?? []) visit(child, depth + 1)
+  }
+  for (const root of roots) visit(root, 0)
+  return out
+})
 
 async function onAudioChange(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement
@@ -97,15 +128,18 @@ async function onAudioChange(event: Event): Promise<void> {
         ＋ 音频轨
       </button>
       <button class="wide" title="把本地音频文件导入为波形片段" @click="audioInput?.click()">导入音频</button>
+      <button class="wide" title="新增一条空编组轨，可把多条轨道收纳进来统一加效果与调音量" @click="addGroupTrack()">
+        ＋ 编组
+      </button>
       <input ref="audioInput" type="file" accept="audio/*" class="hidden-file" @change="onAudioChange" />
     </div>
 
     <div class="list">
       <TrackRow
-        v-for="(track, index) in state.project.tracks"
-        :key="track.id"
-        :track="track"
-        :index="index"
+        v-for="row in rows"
+        :key="row.track.id"
+        :track="row.track"
+        :depth="row.depth"
       />
       <p v-if="!state.project.tracks.length" class="empty">还没有轨道，点右上角「＋」新增</p>
     </div>

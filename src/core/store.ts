@@ -1,6 +1,8 @@
 import { reactive } from 'vue'
 import type {
   AudioClip,
+  AutomationLane,
+  AutomationParam,
   CustomInstrument,
   CustomInstrumentKind,
   CustomSample,
@@ -14,6 +16,8 @@ import type {
   ProjectMeta,
   Region,
   DeviceMode,
+  ScaleSetting,
+  ScaleType,
   TimeSignature,
   Track,
   TrackEffect,
@@ -22,19 +26,24 @@ import type {
   VolumeDisplay
 } from '@/types'
 import {
+  AUTOMATION_PARAM_MAP,
   EFFECT_DEF_MAP,
   EQ_MAX,
   EQ_MIN,
   INSTRUMENT_LABELS,
   LIMITER_MAX,
   LIMITER_MIN,
+  SCALE_DEFS,
+  SCALE_DEF_MAP,
   TIME_SIGNATURE_OPTIONS,
   TRACK_COLORS,
   VELOCITY_MAX,
   VELOCITY_MIN,
   defaultEffectParams,
   drumNoteLabel,
-  resolveInstrumentLabel
+  quantizeMidiToScale,
+  resolveInstrumentLabel,
+  snapMidiToScale
 } from '@/types'
 import {
   MAX_MIDI,
@@ -115,6 +124,12 @@ export interface AppState {
   viewMode: ViewMode
   /** 钢琴卷帘底部力度编辑条是否展开 */
   velocityLaneOn: boolean
+  /** 钢琴卷帘底部自动化包络条是否展开 */
+  automationLaneOn: boolean
+  /** 当前正在编辑的自动化参数 */
+  automationParam: AutomationParam
+  /** 音阶锁定是否开启（开启后写谱与拖动音符都会吸附到工程音阶） */
+  scaleLockOn: boolean
   /** 音符是否按力度着色（低力度冷色、高力度暖色） */
   noteColorByVelocity: boolean
   /** 虚拟键盘 / 试听的力度 0~1 */
@@ -163,6 +178,8 @@ export function createEmptyProject(name = '未命名工程'): Project {
     bars: 8,
     tracks: [],
     customInstruments: [],
+    // 默认不锁定音阶（十二平均律），由用户在钢琴卷帘里显式开启
+    scale: { root: 48, type: 'chromatic' },
     createdAt: now,
     updatedAt: now
   }
@@ -186,10 +203,11 @@ export function createTrack(
   customInstrumentId = ''
 ): Track {
   const isAudio = kind === 'audio'
+  const isGroup = kind === 'group'
   const label = resolveInstrumentLabel(instrument, project.customInstruments, customInstrumentId)
   return {
     id: uid('trk'),
-    name: isAudio ? `音频轨 ${index + 1}` : `${label} ${index + 1}`,
+    name: isGroup ? `编组 ${index + 1}` : isAudio ? `音频轨 ${index + 1}` : `${label} ${index + 1}`,
     kind,
     instrument,
     customInstrumentId: instrument === 'custom' ? customInstrumentId : '',
@@ -197,10 +215,12 @@ export function createTrack(
     effects: [],
     mute: false,
     solo: false,
-    color: isAudio ? '#8fa8ff' : TRACK_COLORS[index % TRACK_COLORS.length],
-    // 音频轨不使用片段模型，音符容器留空
-    regions: isAudio ? [] : [makeRegion(project)],
-    clips: []
+    color: isGroup ? '#f0b46a' : isAudio ? '#8fa8ff' : TRACK_COLORS[index % TRACK_COLORS.length],
+    // 音频轨与编组轨都不使用片段模型，音符容器留空
+    regions: isAudio || isGroup ? [] : [makeRegion(project)],
+    clips: [],
+    parentId: '',
+    automation: []
   }
 }
 
@@ -230,8 +250,48 @@ function normalizeEffects(raw: unknown): TrackEffect[] {
       id: item?.id ?? uid('fx'),
       type,
       enabled: item?.enabled !== false,
-      params
+      params,
+      // 侧链配置只在压缩器上有效，且必须指向一条真实存在的轨道（这里先存原始 id，稍后统一校验）
+      sidechain: normalizeSidechain(item?.sidechain, type)
     })
+  }
+  return out
+}
+
+/** 侧链配置归一化：非法 / 残缺的配置直接丢弃，避免引擎读到无意义的源 */
+function normalizeSidechain(
+  raw: unknown,
+  type: EffectType
+): { sourceTrackId: string; amount: number; release: number } | undefined {
+  if (type !== 'compressor') return undefined
+  const item = raw as { sourceTrackId?: unknown; amount?: unknown; release?: unknown } | undefined
+  if (!item || typeof item.sourceTrackId !== 'string' || !item.sourceTrackId) return undefined
+  return {
+    sourceTrackId: item.sourceTrackId,
+    amount: clamp(Number(item.amount ?? 12) || 0, 0, 48),
+    release: clamp(Number(item.release ?? 0.2) || 0, 0.01, 2)
+  }
+}
+
+/** 自动化包络归一化：过滤非法参数与非法点，并按拍排序 */
+function normalizeAutomation(raw: unknown): AutomationLane[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<AutomationParam>()
+  const out: AutomationLane[] = []
+  for (const item of raw as Partial<AutomationLane>[]) {
+    const param = item?.param as AutomationParam | undefined
+    if (!param || !AUTOMATION_PARAM_MAP[param] || seen.has(param)) continue
+    seen.add(param)
+    const def = AUTOMATION_PARAM_MAP[param]
+    const points = (Array.isArray(item.points) ? item.points : [])
+      .map((p) => ({
+        id: p?.id ?? uid('apt'),
+        beat: Math.max(0, Number(p?.beat) || 0),
+        value: clamp(Number(p?.value) || 0, def.min, def.max)
+      }))
+      .sort((a, b) => a.beat - b.beat)
+    // 一个点无法构成曲线，直接舍弃该条 lane
+    if (points.length >= 2) out.push({ param, points })
   }
   return out
 }
@@ -303,8 +363,9 @@ function normalizeCustomInstruments(raw: unknown): CustomInstrument[] {
  * 音频引擎与 UI 都假设这些字段一定存在，因此在入口处统一做一次归一化。
  */
 function normalizeTrack(raw: Partial<Track>, index: number): Track {
-  const kind: TrackKind = raw.kind === 'audio' ? 'audio' : 'midi'
+  const kind: TrackKind = raw.kind === 'audio' ? 'audio' : raw.kind === 'group' ? 'group' : 'midi'
   const isAudio = kind === 'audio'
+  const isGroup = kind === 'group'
   return {
     id: raw.id ?? uid('trk'),
     name: raw.name ?? `轨道 ${index + 1}`,
@@ -323,20 +384,24 @@ function normalizeTrack(raw: Partial<Track>, index: number): Track {
     color: raw.color ?? TRACK_COLORS[index % TRACK_COLORS.length],
     regions: isAudio
       ? []
-      : (raw.regions ?? []).map((r) => ({
-          id: r.id ?? uid('rgn'),
-          name: r.name ?? '片段',
-          start: r.start ?? 0,
-          length: r.length ?? 0,
-          notes: (r.notes ?? []).map((n) => ({
-            id: n.id ?? uid('note'),
-            midi: n.midi ?? 60,
-            start: n.start ?? 0,
-            duration: n.duration ?? 0.25,
-            velocity: n.velocity ?? 0.85
-          }))
-        })),
-    clips: normalizeClips(raw.clips)
+      : isGroup
+        ? []
+        : (raw.regions ?? []).map((r) => ({
+            id: r.id ?? uid('rgn'),
+            name: r.name ?? '片段',
+            start: r.start ?? 0,
+            length: r.length ?? 0,
+            notes: (r.notes ?? []).map((n) => ({
+              id: n.id ?? uid('note'),
+              midi: n.midi ?? 60,
+              start: n.start ?? 0,
+              duration: n.duration ?? 0.25,
+              velocity: n.velocity ?? 0.85
+            }))
+          })),
+    clips: isGroup ? [] : normalizeClips(raw.clips),
+    parentId: typeof raw.parentId === 'string' ? raw.parentId : '',
+    automation: normalizeAutomation(raw.automation)
   }
 }
 
@@ -352,6 +417,25 @@ export function normalizeProject(raw: Partial<Project>, fallbackName = '未命�
       track.customInstrumentId = ''
     }
   }
+  // 编组关系收敛：只允许挂到真实存在的编组轨上，且不能形成环（父子互为对方父级）
+  const byId = new Map(tracks.map((t) => [t.id, t]))
+  for (const track of tracks) {
+    const parent = track.parentId ? byId.get(track.parentId) : undefined
+    if (!parent || parent.kind !== 'group' || parent.id === track.id) {
+      track.parentId = ''
+      continue
+    }
+    // 父级也挂在当前轨道上（环）时断开，避免信号链自锁
+    if (parent.parentId === track.id) parent.parentId = ''
+  }
+  // 侧链源校验：源轨道必须存在且不是自己
+  for (const track of tracks) {
+    for (const effect of track.effects) {
+      if (effect.sidechain && (!byId.has(effect.sidechain.sourceTrackId) || effect.sidechain.sourceTrackId === track.id)) {
+        effect.sidechain = undefined
+      }
+    }
+  }
   return {
     ...base,
     ...raw,
@@ -363,9 +447,17 @@ export function normalizeProject(raw: Partial<Project>, fallbackName = '未命�
     bars: raw.bars ?? base.bars,
     tracks,
     customInstruments,
+    scale: normalizeScale(raw.scale),
     createdAt: raw.createdAt ?? base.createdAt,
     updatedAt: raw.updatedAt ?? base.updatedAt
   }
+}
+
+/** 音阶设置归一化：非法类型退回十二平均律，根音收敛到 C3~B3 */
+function normalizeScale(raw: unknown): ScaleSetting {
+  const item = raw as Partial<ScaleSetting> | undefined
+  const type = item?.type && SCALE_DEF_MAP[item.type] ? (item.type as ScaleType) : 'chromatic'
+  return { root: clamp(Math.round(Number(item?.root ?? 48) || 48), 48, 59), type }
 }
 
 // ---------------------------------------------------------------- 全局状态
@@ -388,6 +480,9 @@ export const state = reactive<AppState>({
   activePitches: [],
   viewMode: 'piano',
   velocityLaneOn: true,
+  automationLaneOn: false,
+  automationParam: 'volume',
+  scaleLockOn: false,
   noteColorByVelocity: false,
   keyboardVelocity: 0.85,
   volumeDisplay: 'db',
@@ -498,14 +593,25 @@ function startTickLoop(): void {
   if (tickStarted) return
   tickStarted = true
 
+  let lastFrameAt = performance.now()
+
   const tick = () => {
+    const now = performance.now()
+    // 两帧之间真实流逝的毫秒数：侧链包络的平滑时间常数依赖它
+    const deltaMs = Math.min(120, now - lastFrameAt)
+    lastFrameAt = now
+
     state.isPlaying = engine.isPlaying
     state.playheadBeats = engine.getBeats()
     if (state.isCountingIn && engine.getBeats() > 0) state.isCountingIn = false
     if (state.recording) state.recordingSeconds = recordingSeconds()
 
     // 仅在音频上下文就绪后才采样电平，避免未初始化时读到无意义的 0
-    if (state.audioReady) sampleLevels()
+    if (state.audioReady) {
+      sampleLevels()
+      // 侧链闪避需要逐帧跟随源轨道包络，放在电平采样之后（复用同一批数据）
+      engine.updateSidechain(deltaMs)
+    }
 
     if (syncRequestedAt && performance.now() - syncRequestedAt >= 120) {
       syncRequestedAt = 0
@@ -624,10 +730,15 @@ export function selectTrack(id: string): void {
 
 /**
  * 让中央编辑区视图与轨道类型保持一致：
- * 选中音频轨时从钢琴卷帘切到波形视图，选中 MIDI 轨时从波形视图切回钢琴卷帘。
- * 混音台视图由用户显式选择，不做自动切换。
+ * 选中音频轨时从钢琴卷帘切到波形视图，选中 MIDI 轨时从波形视图切回钢琴卷帘，
+ * 选中编组轨时切到混音台。混音台之外不做自动切换。
  */
 function alignViewModeWithTrack(track: Track | undefined): void {
+  // 编组轨自身没有音符 / 波形，切到混音台便于统一处理它的效果链与推子
+  if (track?.kind === 'group') {
+    if (state.viewMode !== 'mixer') state.viewMode = 'mixer'
+    return
+  }
   if (track?.kind === 'audio' && state.viewMode === 'piano') state.viewMode = 'audio'
   else if (track?.kind === 'midi' && state.viewMode === 'audio') state.viewMode = 'piano'
 }
@@ -668,6 +779,14 @@ export function removeTrack(id: string): void {
   const [removed] = state.project.tracks.splice(index, 1)
   // 被删除轨道的采样若已无人引用，同步从 IndexedDB 清掉
   void releaseUnusedPcm(removed.clips.map((c) => c.key))
+  // 删除编组时不连带删除子轨：把子轨提升回主干，避免音频突然消失
+  for (const track of state.project.tracks) {
+    if (track.parentId === removed.id) track.parentId = ''
+    // 引用了该轨道作为侧链源的压缩器，解除侧链避免指向不存在的轨道
+    for (const effect of track.effects) {
+      if (effect.sidechain?.sourceTrackId === removed.id) effect.sidechain = undefined
+    }
+  }
   if (state.selectedTrackId === id) {
     const nextId = state.project.tracks[Math.min(index, state.project.tracks.length - 1)]?.id ?? ''
     state.selectedTrackId = nextId
@@ -793,6 +912,199 @@ export function toggleSolo(id: string): void {
   commit()
 }
 
+// ---------------------------------------------------------------- 自动化包络
+
+/** 取某参数的静态值（该参数在混音台上的推子值，也是自动化曲线的基准） */
+export function automationStaticValue(track: Track, param: AutomationParam): number {
+  return track[param]
+}
+
+/** 取某条自动化曲线（不存在时返回 undefined） */
+export function automationLane(track: Track, param: AutomationParam): AutomationLane | undefined {
+  return track.automation.find((lane) => lane.param === param)
+}
+
+/** 自动化改动后的统一收尾：通知引擎并记一步历史 */
+function finishAutomation(track: Track, label: string, coalesceKey = ''): void {
+  engine.updateTrackAutomation(track)
+  record(label, coalesceKey)
+  commit()
+}
+
+/** 新增一个自动化关键点（同一拍已有则覆盖其数值） */
+export function addAutomationPoint(
+  trackId: string,
+  param: AutomationParam,
+  beat: number,
+  value: number
+): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  if (!track) return
+  const def = AUTOMATION_PARAM_MAP[param]
+  const safeBeat = Math.max(0, roundBeat(beat))
+  const safeValue = clamp(value, def.min, def.max)
+  let lane = automationLane(track, param)
+  if (!lane) {
+    lane = { param, points: [] }
+    track.automation.push(lane)
+  }
+  const exist = lane.points.find((p) => Math.abs(p.beat - safeBeat) < 0.001)
+  if (exist) exist.value = safeValue
+  else lane.points.push({ id: uid('apt'), beat: safeBeat, value: safeValue })
+  lane.points.sort((a, b) => a.beat - b.beat)
+  finishAutomation(track, `添加自动化点：${def.label}`)
+}
+
+/** 拖动 / 改写一个自动化点（拖拽过程中用同一个 coalesceKey 合并成一步） */
+export function moveAutomationPoint(
+  trackId: string,
+  param: AutomationParam,
+  pointId: string,
+  beat: number,
+  value: number
+): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  if (!track) return
+  const lane = automationLane(track, param)
+  const point = lane?.points.find((p) => p.id === pointId)
+  if (!lane || !point) return
+  const def = AUTOMATION_PARAM_MAP[param]
+  point.beat = Math.max(0, roundBeat(beat))
+  point.value = clamp(value, def.min, def.max)
+  // 位置变化会打乱顺序，重新排序保证曲线按拍递增
+  lane.points.sort((a, b) => a.beat - b.beat)
+  finishAutomation(track, `调整自动化：${def.label}`, `apt:${pointId}`)
+}
+
+/** 删除一个自动化点；点少于 2 个时整条曲线一并移除 */
+export function removeAutomationPoint(
+  trackId: string,
+  param: AutomationParam,
+  pointId: string
+): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  if (!track) return
+  const lane = automationLane(track, param)
+  if (!lane) return
+  const index = lane.points.findIndex((p) => p.id === pointId)
+  if (index < 0) return
+  lane.points.splice(index, 1)
+  const def = AUTOMATION_PARAM_MAP[param]
+  if (lane.points.length < 2) {
+    track.automation = track.automation.filter((l) => l !== lane)
+    finishAutomation(track, `清除自动化：${def.label}`)
+    return
+  }
+  finishAutomation(track, `删除自动化点：${def.label}`)
+}
+
+/** 清空某参数的自动化曲线，恢复为推子上的静态值 */
+export function clearAutomation(trackId: string, param: AutomationParam): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  if (!track) return
+  const lane = automationLane(track, param)
+  if (!lane) return
+  track.automation = track.automation.filter((l) => l !== lane)
+  finishAutomation(track, `清除自动化：${AUTOMATION_PARAM_MAP[param].label}`)
+}
+
+// ---------------------------------------------------------------- 音阶锁定
+
+/** 切换音阶锁定开关（关闭后写谱恢复自由半音） */
+export function toggleScaleLock(): void {
+  state.scaleLockOn = !state.scaleLockOn
+  state.statusText = state.scaleLockOn ? '音阶锁定已开启' : '音阶锁定已关闭'
+}
+
+/** 设置音阶根音 */
+export function setScaleRoot(root: number): void {
+  state.project.scale = { ...state.project.scale, root: clamp(Math.round(root), 48, 59) }
+  record('调整音阶根音')
+  persistOnly()
+}
+
+/** 设置音阶类型（选到「十二平均律」等价于关闭锁定） */
+export function setScaleType(type: ScaleType): void {
+  if (!SCALE_DEF_MAP[type]) return
+  state.project.scale = { ...state.project.scale, type }
+  if (type === 'chromatic') state.scaleLockOn = false
+  record(`切换音阶：${SCALE_DEF_MAP[type].label}`)
+  persistOnly()
+}
+
+/** 把音阶内的合法音高吸附到工程音阶（供钢琴卷帘创建 / 拖动音符时调用） */
+export function snapMidi(midi: number): number {
+  if (!state.scaleLockOn) return midi
+  return snapMidiToScale(midi, state.project.scale)
+}
+
+/**
+ * 把当前选中的音符一键量化到工程音阶。
+ * 返回被修正的音符数量，供界面提示。
+ */
+export function quantizeSelectedToScale(): number {
+  const region = activeRegion()
+  if (!region || state.selectedNoteIds.length === 0) return 0
+  const ids = new Set(state.selectedNoteIds)
+  let count = 0
+  for (const note of region.notes) {
+    if (!ids.has(note.id)) continue
+    const next = quantizeMidiToScale(note.midi, state.project.scale)
+    if (next !== note.midi) {
+      note.midi = next
+      count += 1
+    }
+  }
+  if (count > 0) {
+    record('量化到音阶')
+    commit()
+  }
+  return count
+}
+
+// ---------------------------------------------------------------- 编组 / Bus
+
+/** 新增一个编组轨（自身不发声，用于汇总子轨并统一处理） */
+export function addGroupTrack(): string {
+  const track = createTrack(state.project, 'piano', state.project.tracks.length, 'group')
+  state.project.tracks.push(track)
+  state.selectedTrackId = track.id
+  state.selectedNoteIds = []
+  state.selectedClipId = ''
+  record(`新增编组：${track.name}`)
+  commit()
+  return track.id
+}
+
+/** 判断 candidate 是否为 track 的后代（用于防止把编组拖进自己的子轨里形成环） */
+function isDescendant(candidate: string, trackId: string): boolean {
+  const byId = new Map(state.project.tracks.map((t) => [t.id, t]))
+  let cursor = byId.get(candidate)
+  let guard = 0
+  while (cursor && cursor.parentId && guard < 512) {
+    if (cursor.parentId === trackId) return true
+    cursor = byId.get(cursor.parentId)
+    guard += 1
+  }
+  return false
+}
+
+/** 把轨道挂到某个编组下（parentId 为空表示移出编组、挂回主干） */
+export function setTrackParent(trackId: string, parentId: string): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  if (!track || track.id === parentId) return
+  if (parentId) {
+    const parent = state.project.tracks.find((t) => t.id === parentId)
+    if (!parent || parent.kind !== 'group') return
+    // 不允许把编组拖进自己的后代，否则信号链会成环
+    if (isDescendant(parentId, trackId)) return
+  }
+  if (track.parentId === parentId) return
+  track.parentId = parentId
+  record(parentId ? `移入编组：${track.name}` : `移出编组：${track.name}`)
+  commit()
+}
+
 // ---------------------------------------------------------------- 效果器
 
 /** 把效果器链推给音频引擎（结构变化会重建链路，仅参数变化则原地更新） */
@@ -855,8 +1167,38 @@ export function resetEffect(trackId: string, effectId: string): void {
   const effect = track?.effects.find((e) => e.id === effectId)
   if (!track || !effect) return
   effect.params = defaultEffectParams(effect.type)
+  // 重置时一并解除侧链，避免留下看不见的衰减
+  effect.sidechain = undefined
   pushEffects(track)
   record('重置效果器参数')
+  commit()
+}
+
+/**
+ * 设置压缩器的侧链配置。
+ * sourceTrackId 传空字符串表示关闭侧链；amount 为最大衰减（dB），release 为恢复时间（秒）。
+ */
+export function setEffectSidechain(
+  trackId: string,
+  effectId: string,
+  sourceTrackId: string,
+  amount: number,
+  release: number
+): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  const effect = track?.effects.find((e) => e.id === effectId)
+  if (!track || !effect || effect.type !== 'compressor') return
+  if (!sourceTrackId || sourceTrackId === trackId) {
+    effect.sidechain = undefined
+  } else {
+    effect.sidechain = {
+      sourceTrackId,
+      amount: clamp(amount, 0, 48),
+      release: clamp(release, 0.01, 2)
+    }
+  }
+  pushEffects(track)
+  record(effect.sidechain ? '设置侧链压缩' : '关闭侧链压缩')
   commit()
 }
 
@@ -1756,6 +2098,17 @@ export function toggleVelocityLane(): void {
 /** 切换「按力度着色」显示 */
 export function toggleNoteColor(): void {
   state.noteColorByVelocity = !state.noteColorByVelocity
+}
+
+/** 切换底部自动化包络编辑条 */
+export function toggleAutomationLane(): void {
+  state.automationLaneOn = !state.automationLaneOn
+}
+
+/** 切换当前正在编辑的自动化参数 */
+export function setAutomationParam(param: AutomationParam): void {
+  if (!AUTOMATION_PARAM_MAP[param]) return
+  state.automationParam = param
 }
 
 /** 设置虚拟键盘 / 试听力度（0~1） */

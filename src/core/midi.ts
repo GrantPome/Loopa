@@ -146,7 +146,8 @@ export function projectToMidi(project: Project): Blob {
   let trackCount = 1
 
   for (const track of project.tracks) {
-    if (track.kind === 'audio') continue
+    // 仅导出 MIDI 轨：音频轨没有音符数据，编组轨只是汇总节点
+    if (track.kind !== 'midi') continue
     const drum = isDrumTrackForExport(track, project)
     const channel = drum ? 9 : 0
     const events: RawEvent[] = [{ tick: 0, data: [0xff, 0x03, ...lenPrefixed(utf8(track.name))] }]

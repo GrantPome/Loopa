@@ -6,13 +6,23 @@
  * - 只绘制视口内的行与音符，保证大量音符时依然流畅
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue'
-import type { GridDivision, Note } from '@/types'
-import { INSTRUMENT_LABELS } from '@/types'
+import type { AutomationPoint, GridDivision, Note } from '@/types'
+import {
+  AUTOMATION_PARAMS,
+  AUTOMATION_PARAM_MAP,
+  INSTRUMENT_LABELS,
+  SCALE_DEFS,
+  SCALE_ROOT_OPTIONS
+} from '@/types'
 import {
   activeRegion,
   activeTrack,
+  addAutomationPoint,
   addNote,
   applyNoteVelocities,
+  automationLane,
+  automationStaticValue,
+  clearAutomation,
   clearNoteSelection,
   commit,
   copySelectedNotes,
@@ -21,30 +31,47 @@ import {
   duplicateSelectedNotes,
   ensureBarsForBeat,
   humanizeTargetVelocity,
+  moveAutomationPoint,
   nudgeTargetVelocity,
   pasteNotes,
   previewAttack,
   previewNote,
   quantizeSelected,
+  quantizeSelectedToScale,
+  removeAutomationPoint,
   removeNotes,
   scaleTargetVelocity,
+  setAutomationParam,
   selectAllNotes,
   setNoteSelection,
+  setScaleRoot,
+  setScaleType,
   setTargetVelocity,
+  snapMidi,
   state,
+  toggleAutomationLane,
   toggleNoteColor,
   toggleNoteSelection,
+  toggleScaleLock,
   toggleVelocityLane
 } from '@/core/store'
 import { MAX_MIDI, MIN_MIDI, beatsPerBarOf, clamp, floorToGrid, isBlackKey, midiToNoteName, roundBeat, snapTo } from '@/utils/music'
 import { midiToVelocity, velocityToMidi } from '@/utils/audio'
 import { hexToRgba } from '@/utils/color'
-import { KEY_WIDTH, NAV_HEIGHT, SCROLLBAR_SIZE, VELOCITY_LANE_HEIGHT } from '@/utils/layout'
+import {
+  AUTOMATION_LANE_HEIGHT,
+  KEY_WIDTH,
+  NAV_HEIGHT,
+  SCROLLBAR_SIZE,
+  VELOCITY_LANE_HEIGHT
+} from '@/utils/layout'
 
 const bodyEl = ref<HTMLDivElement | null>(null)
 const gridEl = ref<HTMLCanvasElement | null>(null)
 const keysEl = ref<HTMLCanvasElement | null>(null)
 const velocityEl = ref<HTMLCanvasElement | null>(null)
+/** 底部自动化包络条的画布 */
+const automationEl = ref<HTMLCanvasElement | null>(null)
 /** 底部缩略导航条：容器与画布 */
 const navHostEl = ref<HTMLDivElement | null>(null)
 const navCanvasEl = ref<HTMLCanvasElement | null>(null)
@@ -753,9 +780,9 @@ function onNavPointerUp(): void {
   window.removeEventListener('pointercancel', onNavPointerUp)
 }
 
-/** 力度条坐标 → 画布本地坐标 */
-function laneLocal(event: PointerEvent): { x: number; y: number } {
-  const canvas = velocityEl.value
+/** 底部编辑条坐标 → 画布本地坐标（默认取力度条画布，自动化条显式传入自己的画布） */
+function laneLocal(event: PointerEvent | MouseEvent, target?: HTMLCanvasElement | null): { x: number; y: number } {
+  const canvas = target ?? velocityEl.value
   if (!canvas) return { x: 0, y: 0 }
   const rect = canvas.getBoundingClientRect()
   return { x: event.clientX - rect.left, y: event.clientY - rect.top }
@@ -881,6 +908,245 @@ function onVelocityUniform(): void {
   requestDraw()
 }
 
+// ---------------------------------------------------------------- 自动化包络条
+
+/** 当前轨道指定参数的自动化曲线 */
+const currentLane = computed(() =>
+  track.value ? automationLane(track.value, state.automationParam) : undefined
+)
+
+/** 参数值域（用于把数值映射到纵向坐标） */
+const paramRange = computed(() => AUTOMATION_PARAM_MAP[state.automationParam])
+
+/** 横向像素 → 拍 */
+function beatAtX(x: number): number {
+  return Math.max(0, x / state.view.pxPerBeat)
+}
+
+/** 纵向像素 → 参数值（顶部为最大值） */
+function autoValueAtY(y: number): number {
+  const canvas = automationEl.value
+  const h = canvas?.clientHeight ?? AUTOMATION_LANE_HEIGHT
+  const range = paramRange.value
+  const ratio = clamp(1 - (y - 3) / (h - 8), 0, 1)
+  return range.min + ratio * (range.max - range.min)
+}
+
+/** 参数值 → 纵向像素（与 autoValueAtY 互为反函数） */
+function autoYAtValue(value: number, height: number): number {
+  const range = paramRange.value
+  const ratio = clamp((value - range.min) / (range.max - range.min), 0, 1)
+  return 3 + (1 - ratio) * (height - 8)
+}
+
+/** 命中测试：找到离触点最近的自动化点（阈值 10px，便于触屏操作） */
+function lanePointAt(x: number, y: number): AutomationPoint | null {
+  const lane = currentLane.value
+  const canvas = automationEl.value
+  if (!lane || !canvas) return null
+  const h = canvas.clientHeight
+  const px = state.view.pxPerBeat
+  let best: AutomationPoint | null = null
+  let bestDist = Infinity
+  for (const point of lane.points) {
+    const dx = point.beat * px - x
+    const dy = autoYAtValue(point.value, h) - y
+    const dist = Math.hypot(dx, dy)
+    if (dist < 12 && dist < bestDist) {
+      bestDist = dist
+      best = point
+    }
+  }
+  return best
+}
+
+/** 在当前播放头位置插入一个自动化点（工具条按钮用） */
+function onAddAutomationPoint(): void {
+  if (!track.value) return
+  addAutomationPoint(track.value.id, state.automationParam, state.playheadBeats, currentValue())
+  requestDraw()
+}
+
+/** 当前参数在推子上的静态值（新增点默认取它，曲线更贴近现状） */
+function currentValue(): number {
+  return track.value ? automationStaticValue(track.value, state.automationParam) : paramRange.value.def
+}
+
+/** 清空当前参数的自动化曲线 */
+function onClearAutomation(): void {
+  if (!track.value) return
+  clearAutomation(track.value.id, state.automationParam)
+  requestDraw()
+}
+
+/** 切换当前编辑的自动化参数 */
+function onAutomationParamChange(event: Event): void {
+  const value = (event.target as HTMLSelectElement).value as typeof state.automationParam
+  setAutomationParam(value)
+  requestDraw()
+}
+
+/** 参数读数文案：均衡用 dB，其余用百分比 */
+function paramValueText(value: number): string {
+  const param = state.automationParam
+  if (param === 'eqLow' || param === 'eqMid' || param === 'eqHigh') return `${value.toFixed(1)} dB`
+  if (param === 'pan') {
+    if (Math.abs(value) < 0.01) return '居中'
+    return `${value < 0 ? '左' : '右'} ${Math.round(Math.abs(value) * 100)}%`
+  }
+  return `${Math.round(value * 100)}%`
+}
+
+// ---------------------------------------------------------------- 音阶锁定
+
+function onScaleTypeChange(event: Event): void {
+  setScaleType((event.target as HTMLSelectElement).value as Parameters<typeof setScaleType>[0])
+  requestDraw()
+}
+
+function onScaleRootChange(event: Event): void {
+  setScaleRoot(Number((event.target as HTMLSelectElement).value))
+  requestDraw()
+}
+
+/** 把选中音符吸附到当前音阶 */
+function onQuantizeToScale(): void {
+  const count = quantizeSelectedToScale()
+  state.statusText = count ? `已把 ${count} 个音符吸附到音阶` : '所有选中音符都已在音阶内'
+  requestDraw()
+}
+
+/** 自动化条拖拽状态 */
+const autoDrag: { active: boolean; pointId: string } = { active: false, pointId: '' }
+
+function onAutoPointerDown(event: PointerEvent): void {
+  if (event.button !== 0 || !track.value) return
+  const { x, y } = laneLocal(event, automationEl.value)
+  const hit = lanePointAt(x, y)
+  if (hit) {
+    autoDrag.active = true
+    autoDrag.pointId = hit.id
+  } else {
+    // 空白处按下：在该位置新建一个点并立即进入拖拽，写曲线时一气呵成
+    addAutomationPoint(track.value.id, state.automationParam, beatAtX(x), autoValueAtY(y))
+    const lane = currentLane.value
+    const created = lane?.points.find((p) => Math.abs(p.beat - roundBeat(beatAtX(x))) < 0.001)
+    if (!created) return
+    autoDrag.active = true
+    autoDrag.pointId = created.id
+  }
+  window.addEventListener('pointermove', onAutoPointerMove)
+  window.addEventListener('pointerup', onAutoPointerUp)
+  window.addEventListener('pointercancel', onAutoPointerUp)
+  requestDraw()
+}
+
+function onAutoPointerMove(event: PointerEvent): void {
+  if (!autoDrag.active || !track.value) return
+  const { x, y } = laneLocal(event, automationEl.value)
+  moveAutomationPoint(
+    track.value.id,
+    state.automationParam,
+    autoDrag.pointId,
+    beatAtX(x),
+    autoValueAtY(y)
+  )
+  requestDraw()
+}
+
+function onAutoPointerUp(): void {
+  if (!autoDrag.active) return
+  autoDrag.active = false
+  autoDrag.pointId = ''
+  window.removeEventListener('pointermove', onAutoPointerMove)
+  window.removeEventListener('pointerup', onAutoPointerUp)
+  window.removeEventListener('pointercancel', onAutoPointerUp)
+  requestDraw()
+}
+
+/** 在自动化点上右键（或 Pad 长按）→ 删除该点 */
+function onAutoContextMenu(event: MouseEvent): void {
+  event.preventDefault()
+  if (!track.value) return
+  const { x, y } = laneLocal(event, automationEl.value)
+  const hit = lanePointAt(x, y)
+  if (!hit) return
+  removeAutomationPoint(track.value.id, state.automationParam, hit.id)
+  requestDraw()
+}
+
+/** 绘制自动化包络条：折线连接各关键点，并标出播放头位置 */
+function drawAutomation(): void {
+  const canvas = automationEl.value
+  if (!canvas) return
+  const cssWidth = canvas.clientWidth
+  const cssHeight = canvas.clientHeight
+  const ctx = prepareCanvas(canvas, cssWidth, cssHeight)
+  if (!ctx) return
+  ctx.clearRect(0, 0, cssWidth, cssHeight)
+
+  // 背景与参考线（25% / 50% / 75% 处各一条，便于目测数值）
+  ctx.fillStyle = '#14151a'
+  ctx.fillRect(0, 0, cssWidth, cssHeight)
+  ctx.fillStyle = 'rgba(255,255,255,0.06)'
+  ;[0.25, 0.5, 0.75].forEach((ratio) => {
+    ctx.fillRect(0, Math.round(cssHeight * ratio), cssWidth, 1)
+  })
+  ctx.fillStyle = 'rgba(255,255,255,0.16)'
+  ctx.fillRect(0, 0, cssWidth, 1)
+
+  const body = bodyEl.value
+  const viewL = body?.scrollLeft ?? 0
+  const px = state.view.pxPerBeat
+  const value = currentValue()
+  const color = trackColor.value
+
+  // 曲线缺失时画一条虚线表示推子静态值，让用户知道从哪起步
+  ctx.setLineDash([4, 4])
+  ctx.strokeStyle = 'rgba(255,255,255,0.28)'
+  ctx.lineWidth = 1
+  const baseY = autoYAtValue(value, cssHeight)
+  ctx.beginPath()
+  ctx.moveTo(0, baseY + 0.5)
+  ctx.lineTo(cssWidth, baseY + 0.5)
+  ctx.stroke()
+  ctx.setLineDash([])
+
+  const lane = currentLane.value
+  if (!lane || lane.points.length === 0) return
+
+  ctx.strokeStyle = color
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  lane.points.forEach((point, index) => {
+    const x = point.beat * px
+    const y = autoYAtValue(point.value, cssHeight)
+    if (index === 0) ctx.moveTo(x, y)
+    else ctx.lineTo(x, y)
+  })
+  ctx.stroke()
+
+  for (const point of lane.points) {
+    const x = point.beat * px
+    if (x < viewL - 20 || x > viewL + cssWidth + 20) continue
+    const y = autoYAtValue(point.value, cssHeight)
+    ctx.fillStyle = autoDrag.pointId === point.id ? '#ffffff' : color
+    ctx.beginPath()
+    ctx.arc(x, y, autoDrag.pointId === point.id ? 5 : 4, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)'
+    ctx.lineWidth = 1
+    ctx.stroke()
+  }
+
+  // 播放头竖线：与主网格的播放头位置对齐
+  const playX = state.playheadBeats * px
+  if (playX >= viewL && playX <= viewL + cssWidth) {
+    ctx.fillStyle = 'rgba(255,120,120,0.85)'
+    ctx.fillRect(playX, 0, 1, cssHeight)
+  }
+}
+
 // ---------------------------------------------------------------- 重绘调度
 
 let rafId = 0
@@ -906,6 +1172,7 @@ function loop(): void {
     drawGrid()
     drawKeys()
     if (state.velocityLaneOn) drawVelocity()
+    if (state.automationLaneOn) drawAutomation()
     drawNav()
     dirty = false
   }
@@ -1080,8 +1347,8 @@ function onPointerMove(event: PointerEvent): void {
     if (movedEnough) {
       clearLongPressTimer()
       if (drag.mode === 'create-pending') {
-        // PC：空白处拖动 = 新增音符并拉长
-        const midi = drag.originMidi
+        // PC：空白处拖动 = 新增音符并拉长（音阶锁定开启时自动吸附到工程音阶）
+        const midi = snapMidi(drag.originMidi)
         const start = drag.originBeat
         const note = addNote(midi, start, state.snapDivision)
         if (note) {
@@ -1143,7 +1410,8 @@ function onPointerMove(event: PointerEvent): void {
       const deltaBeat = snapTo(beat - drag.originBeat, step)
       const deltaMidi = midi - drag.originMidi
       note.start = roundBeat(Math.max(0, snapshot.start + deltaBeat))
-      note.midi = clamp(snapshot.midi + deltaMidi, MIN_MIDI, MAX_MIDI)
+      // 音阶锁定开启时，拖动后的音高吸附到音阶内的最近音
+      note.midi = snapMidi(clamp(snapshot.midi + deltaMidi, MIN_MIDI, MAX_MIDI))
     } else if (drag.mode === 'resize-end') {
       const end = Math.max(snapshot.start + step, snapTo(beat, step))
       note.duration = roundBeat(end - note.start)
@@ -1194,7 +1462,7 @@ function onPointerUp(event?: PointerEvent): void {
   // 若手势是被系统中断（cancelled），则视为放弃，不新增音符
   if (drag.mode === 'create-pending' || drag.mode === 'marquee-pending') {
     if (!cancelled) {
-      const midi = drag.originMidi
+      const midi = snapMidi(drag.originMidi)
       const start = drag.originBeat
       const note = addNote(midi, start, state.snapDivision)
       if (note) {
@@ -1426,7 +1694,13 @@ watch(
     state.activePitches.length,
     state.project.timeSignature,
     state.velocityLaneOn,
-    state.noteColorByVelocity
+    state.noteColorByVelocity,
+    // 自动化包络条展开 / 切换参数、音阶锁定与根音变化都需要重绘
+    state.automationLaneOn,
+    state.automationParam,
+    state.project.scale.type,
+    state.project.scale.root,
+    state.scaleLockOn
   ],
   () => requestDraw()
 )
@@ -1465,6 +1739,41 @@ watch(
         @click="toggleNoteColor"
       >
         力度着色
+      </button>
+      <button
+        :class="{ active: state.automationLaneOn }"
+        title="展开 / 收起底部自动化包络编辑条"
+        @click="toggleAutomationLane"
+      >
+        包络
+      </button>
+      <label class="field">
+        音阶
+        <select :value="state.project.scale.type" @change="onScaleTypeChange">
+          <option v-for="def in SCALE_DEFS" :key="def.type" :value="def.type">{{ def.label }}</option>
+        </select>
+      </label>
+      <label class="field">
+        根音
+        <select :value="state.project.scale.root" @change="onScaleRootChange">
+          <option v-for="opt in SCALE_ROOT_OPTIONS" :key="opt.value" :value="opt.value">
+            {{ opt.label }}
+          </option>
+        </select>
+      </label>
+      <button
+        :class="{ active: state.scaleLockOn }"
+        title="开启后，新增与拖动音符都会吸附到所选音阶"
+        @click="toggleScaleLock"
+      >
+        锁定
+      </button>
+      <button
+        :disabled="state.selectedNoteIds.length === 0"
+        title="把选中音符的错音吸附到当前音阶"
+        @click="onQuantizeToScale"
+      >
+        吸附音阶
       </button>
       <button
         :disabled="state.selectedNoteIds.length === 0"
@@ -1579,6 +1888,48 @@ watch(
                 class="lane-canvas"
                 :style="{ width: totalWidth + 'px', height: '100%' }"
                 @pointerdown="onLanePointerDown"
+              />
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- 下：自动化包络编辑条（可折叠） -->
+      <template v-if="state.automationLaneOn">
+        <div class="pr-velbar">
+          <span class="lane-title">包络</span>
+          <label class="field">
+            参数
+            <select :value="state.automationParam" @change="onAutomationParamChange">
+              <option v-for="item in AUTOMATION_PARAMS" :key="item.key" :value="item.key">
+                {{ item.label }}
+              </option>
+            </select>
+          </label>
+          <button title="在播放头位置插入一个自动化点" @click="onAddAutomationPoint">加点</button>
+          <button :disabled="!currentLane" title="清除当前参数的整条曲线" @click="onClearAutomation">
+            清除
+          </button>
+          <span class="dim">空白处点击 / 拖动新增点，拖圆点改位置，右键删除点</span>
+          <span class="gap" />
+          <span class="lane-readout">
+            当前 {{ paramValueText(currentValue()) }}
+          </span>
+        </div>
+
+        <div class="pr-bottom" :style="{ height: AUTOMATION_LANE_HEIGHT + 'px' }">
+          <div class="pr-lane-label" :style="{ width: KEY_WIDTH + 'px' }">包络</div>
+          <div class="pr-velocity" @wheel.prevent="onWheel">
+            <div
+              class="lane-inner"
+              :style="{ width: totalWidth + 'px', transform: `translateX(${-state.view.scrollLeft}px)` }"
+            >
+              <canvas
+                ref="automationEl"
+                class="lane-canvas"
+                :style="{ width: totalWidth + 'px', height: '100%' }"
+                @pointerdown="onAutoPointerDown"
+                @contextmenu.prevent="onAutoContextMenu"
               />
             </div>
           </div>

@@ -20,3 +20,6 @@ export const VELOCITY_LANE_HEIGHT = 78
 
 /** 钢琴卷帘底部横向缩略导航条高度（px） */
 export const NAV_HEIGHT = 44
+
+/** 钢琴卷帘底部自动化包络编辑条高度（px） */
+export const AUTOMATION_LANE_HEIGHT = 90

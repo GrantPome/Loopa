@@ -14,17 +14,53 @@ import {
   selectTrack,
   setTrackInstrument,
   setTrackPan,
+  setTrackParent,
   setTrackVolume,
   toggleMute,
   toggleSolo
 } from '@/core/store'
 import { formatVolume } from '@/utils/audio'
 
-const props = defineProps<{ track: Track; index: number }>()
+const props = defineProps<{ track: Track; depth: number }>()
 
 const selected = computed(() => state.selectedTrackId === props.track.id)
 /** 是否为音频轨：音频轨没有音色选择，改为展示片段数量 */
 const isAudio = computed(() => props.track.kind === 'audio')
+/** 是否为编组 / 总线轨：自身不发声，仅汇总子轨 */
+const isGroup = computed(() => props.track.kind === 'group')
+/** 树形缩进：每深一级左移 14px，让子轨在视觉上隶属于编组 */
+const indentStyle = computed(() => ({ paddingLeft: `${8 + props.depth * 14}px` }))
+
+/** 编组轨的子轨数量（用于展示汇总信息） */
+const childCount = computed(
+  () => state.project.tracks.filter((t) => t.parentId === props.track.id).length
+)
+
+/**
+ * 可作为父编组的候选：全部编组轨，排除自身与自身的后代 ——
+ * 否则父子互指会让信号链成环。
+ */
+const groupOptions = computed(() => {
+  const byId = new Map(state.project.tracks.map((t) => [t.id, t]))
+  const isDescendant = (candidateId: string): boolean => {
+    let cursor = byId.get(candidateId)
+    let guard = 0
+    while (cursor && guard < 32) {
+      if (cursor.parentId === props.track.id) return true
+      cursor = byId.get(cursor.parentId)
+      guard += 1
+    }
+    return false
+  }
+  return state.project.tracks.filter(
+    (t) => t.kind === 'group' && t.id !== props.track.id && !isDescendant(t.id)
+  )
+})
+
+function onParentChange(event: Event): void {
+  setTrackParent(props.track.id, (event.target as HTMLSelectElement).value)
+}
+
 /** 音量读数：随全局显示单位在 dB 与线性百分比之间切换 */
 const volumeText = computed(() => formatVolume(props.track.volume, state.volumeDisplay))
 const volumeUnitTitle = computed(() =>
@@ -82,7 +118,7 @@ function onPanInput(event: Event): void {
 </script>
 
 <template>
-  <div class="track-row" :class="{ selected }" @click="selectTrack(track.id)">
+  <div class="track-row" :class="{ selected, group: isGroup }" :style="indentStyle" @click="selectTrack(track.id)">
     <div class="line">
       <span class="dot" :style="{ background: track.color }" />
       <input class="name" :value="track.name" title="轨道名称" @change="onNameChange" />
@@ -92,7 +128,11 @@ function onPanInput(event: Event): void {
     </div>
 
     <div class="line">
-      <select v-if="!isAudio" class="inst" :value="instrumentValue" @change="onInstrumentChange">
+      <template v-if="isGroup">
+        <span class="badge">编组</span>
+        <span class="clips">{{ childCount }} 条子轨</span>
+      </template>
+      <select v-else-if="!isAudio" class="inst" :value="instrumentValue" @change="onInstrumentChange">
         <option v-for="option in INSTRUMENT_OPTIONS" :key="option.value" :value="option.value">
           {{ option.label }}
         </option>
@@ -114,6 +154,15 @@ function onPanInput(event: Event): void {
       <button class="mini toggle solo" :class="{ on: track.solo }" title="独奏" @click.stop="toggleSolo(track.id)">
         S
       </button>
+    </div>
+
+    <!-- 归属编组：选择后本轨（或本编组）的信号汇入该编组总线，统一加效果与调音量 -->
+    <div v-if="groupOptions.length" class="line slider-line">
+      <span class="label">编组</span>
+      <select class="parent" :value="track.parentId" title="归属编组（无 = 直接接入主干）" @change="onParentChange">
+        <option value="">无（主干）</option>
+        <option v-for="group in groupOptions" :key="group.id" :value="group.id">{{ group.name }}</option>
+      </select>
     </div>
 
     <div class="line slider-line">
@@ -162,6 +211,15 @@ function onPanInput(event: Event): void {
 .track-row.selected {
   background: #232833;
   border-left-color: var(--accent);
+}
+
+/* 编组 / 总线轨：底色略深，强调它是子轨的汇总节点 */
+.track-row.group {
+  background: var(--panel-2);
+}
+
+.track-row.group.selected {
+  background: #232833;
 }
 
 .line {
@@ -259,6 +317,13 @@ function onPanInput(event: Event): void {
   width: 26px;
   color: var(--text-dim);
   flex: 0 0 auto;
+}
+
+/* 归属编组下拉框：占据剩余宽度 */
+.parent {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
 }
 
 .slider-line input[type='range'] {

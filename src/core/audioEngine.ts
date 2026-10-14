@@ -1,14 +1,36 @@
 import * as Tone from 'tone'
-import type { EqBand, InstrumentType, Project, TimeSignature, Track, TrackEffect } from '@/types'
+import type {
+  AutomationLane,
+  AutomationParam,
+  EqBand,
+  InstrumentType,
+  Project,
+  TimeSignature,
+  Track,
+  TrackEffect
+} from '@/types'
 import {
   beatsPerBarOf,
   beatsToTicks,
   midiToNoteName,
   timeSignatureParts
 } from '@/utils/music'
+import { dbToGain } from '@/utils/audio'
 import { createInstrument, isDrumTrack, type InstrumentNode, type ResolvedCustomInstrument, type ResolvedSample } from './instruments'
 import { buildEffectChain, disposeEffectChain, type EffectChainItem } from './effects'
 import { getCachedPcm, hasCachedPcm, pcmToAudioBuffer } from './audioStore'
+
+/**
+ * 可被自动化驱动的音频参数的最小接口。
+ * Tone 的 Param（gain / pan / EQ 频段）都满足这组方法，因此可以统一处理，
+ * 不必为每个参数单独写一套排期逻辑。
+ */
+interface AutomatableParam {
+  value: number
+  setValueAtTime(value: number, time: number): unknown
+  linearRampToValueAtTime(value: number, time: number): unknown
+  cancelScheduledValues(time: number): unknown
+}
 
 /**
  * 计算轨道的实际线性增益：
@@ -44,6 +66,8 @@ interface Channel {
   instrumentSignature: string
   /** 是否按 MIDI 音号触发（鼓组为 true，旋律为 false） */
   drum: boolean
+  /** 父编组轨 id：非空时推子输出汇入父编组的入口 */
+  parentId: string
   /** MIDI 轨的合成器；音频轨为 null */
   instrument: InstrumentNode | null
   /** 统一信号入口 */
@@ -51,11 +75,15 @@ interface Channel {
   effects: EffectChainItem[]
   /** 效果器链结构签名，用于判断是否需要重建 */
   effectSignature: string
+  /** 侧链衰减节点：由源轨道包络驱动，插在效果器链之后、均衡之前 */
+  duck: Tone.Gain
   eq: Tone.EQ3
   panner: Tone.Panner
   gain: Tone.Gain
   send: Tone.Gain
   meter: Tone.Meter
+  /** 侧链当前衰减系数 0~1（1 表示不衰减），用于逐帧平滑 */
+  sidechainEnv: number
 }
 
 /** 数据字段名 → EQ3 属性名的映射 */
@@ -120,6 +148,8 @@ class AudioEngine {
   private clickLo!: Tone.Synth
 
   private channels = new Map<string, Channel>()
+  /** 最近一次同步的轨道列表：用于独奏判定、编组层级解析与侧链求值 */
+  private trackList: Track[] = []
   /** 已排期的音符事件 id，改动工程时用于批量清除 */
   private noteEventIds: number[] = []
   /** 节拍器循环事件 id */
@@ -201,9 +231,10 @@ class AudioEngine {
 
   // ------------------------------------------------------------ 轨道 / 混音
 
-  /** 让音频通道与工程轨道保持一致（新增 / 删除 / 换音色 / 换轨道类型） */
+  /** 让音频通道与工程轨道保持一致（新增 / 删除 / 换音色 / 换轨道类型 / 改编组归属） */
   syncTracks(project: Project): void {
     if (!this.graphReady) return
+    this.trackList = project.tracks
 
     const alive = new Set(project.tracks.map((t) => t.id))
     for (const [id, channel] of Array.from(this.channels.entries())) {
@@ -213,12 +244,14 @@ class AudioEngine {
       }
     }
 
-    for (const track of project.tracks) {
+    for (const track of this.orderByDepth(project.tracks)) {
       let channel = this.channels.get(track.id)
-      // 轨道类型变化、或 MIDI 轨的乐器（含自定义音源采样）变化 → 整个通道重建
+      // 轨道类型变化、乐器（含自定义音源采样）变化、编组归属变化 → 整个通道重建
+      const staleParent = channel !== undefined && channel.parentId !== this.normalizeParent(track)
       const needsRebuild =
         channel !== undefined &&
         (channel.kind !== track.kind ||
+          staleParent ||
           (track.kind === 'midi' && channel.instrumentSignature !== instrumentSignature(track, project)))
       if (needsRebuild && channel) {
         this.disposeChannel(channel)
@@ -235,10 +268,37 @@ class AudioEngine {
     }
   }
 
+  /** 归一化父编组 id：只接受真实存在的编组轨，其余视为无父级 */
+  private normalizeParent(track: Track): string {
+    if (!track.parentId) return ''
+    const parent = this.trackList.find((t) => t.id === track.parentId)
+    return parent && parent.kind === 'group' ? parent.id : ''
+  }
+
+  /**
+   * 按编组层级排序（父在前、子在后），保证建立通道时父编组的 entry 已经存在。
+   * 层级不会很深（编组通常只有一两层），这里用简单的迭代实现。
+   */
+  private orderByDepth(tracks: Track[]): Track[] {
+    const byId = new Map(tracks.map((t) => [t.id, t]))
+    const depthOf = (track: Track): number => {
+      let depth = 0
+      let cursor = byId.get(this.normalizeParent(track) || '')
+      while (cursor && depth < 32) {
+        depth += 1
+        cursor = byId.get(this.normalizeParent(cursor) || '')
+      }
+      return depth
+    }
+    return [...tracks].sort((a, b) => depthOf(a) - depthOf(b))
+  }
+
   /** 建立单条轨道的完整信号链 */
   private createChannel(track: Track, project: Project): Channel {
+    const parentId = this.normalizeParent(track)
     const gain = new Tone.Gain(1)
-    gain.connect(this.dryBus)
+    // 编组轨的子轨输出会汇入编组的 entry，这里先按当前数据连好，父级变化时整体重建
+    gain.connect(this.routeTarget(parentId))
 
     const send = new Tone.Gain(track.reverbSend)
     gain.connect(send)
@@ -249,6 +309,10 @@ class AudioEngine {
 
     const eq = new Tone.EQ3({ low: track.eqLow, mid: track.eqMid, high: track.eqHigh })
     eq.connect(panner)
+
+    // 侧链衰减节点：默认不衰减（增益 1），由 rAF 心跳逐帧驱动
+    const duck = new Tone.Gain(1)
+    duck.connect(eq)
 
     const meter = new Tone.Meter({ normalRange: true, smoothing: 0.85 })
     gain.connect(meter)
@@ -264,18 +328,22 @@ class AudioEngine {
       customInstrumentId: track.customInstrumentId,
       instrumentSignature: instrumentSignature(track, project),
       drum: isDrumTrack(track.instrument, customKind),
+      parentId,
       instrument: null,
       entry,
       effects,
       effectSignature: effectSignature(track.effects),
+      duck,
       eq,
       panner,
       gain,
       send,
-      meter
+      meter,
+      sidechainEnv: 1
     }
     this.connectChain(channel)
 
+    // 编组轨自身不发声：入口作为子轨的汇合点，不挂任何乐器
     if (track.kind === 'midi') {
       const instrument = createInstrument(track.instrument, custom)
       instrument.connect(entry)
@@ -283,6 +351,17 @@ class AudioEngine {
     }
 
     return channel
+  }
+
+  /**
+   * 解析一条轨道的输出目标：
+   * 有父编组且该编组通道已存在时汇入编组的 entry，否则直接进主干声总线。
+   * 注意父子必须按「父在前、子在后」的顺序建链，因此 syncTracks 会先按层级排序。
+   */
+  private routeTarget(parentId: string): Tone.Gain {
+    if (!parentId) return this.dryBus
+    const parent = this.channels.get(parentId)
+    return parent ? parent.entry : this.dryBus
   }
 
   /**
@@ -302,14 +381,14 @@ class AudioEngine {
     return { kind: custom.kind, gain: custom.gain, samples }
   }
 
-  /** 把入口 → 效果器链 → 均衡串起来 */
+  /** 把入口 → 效果器链 → 侧链衰减 → 均衡串起来 */
   private connectChain(channel: Channel): void {
     let node: Tone.ToneAudioNode = channel.entry
     for (const item of channel.effects) {
       node.connect(item.node.input)
       node = item.node.output
     }
-    node.connect(channel.eq)
+    node.connect(channel.duck)
   }
 
   /** 效果器链结构变化时重建（参数变化不重建，走原地更新） */
@@ -360,13 +439,118 @@ class AudioEngine {
     }
   }
 
+  /**
+   * 把工程里的混音参数写到通道上。
+   * 已被自动化曲线接管的参数不再写静态值，否则会与曲线打架（曲线的排期见 scheduleAutomation）。
+   */
   private applyMix(channel: Channel, track: Track, tracks: Track[]): void {
-    channel.gain.gain.value = computeTrackGain(track, tracks)
-    channel.panner.pan.value = track.pan
-    channel.eq.low.value = track.eqLow
-    channel.eq.mid.value = track.eqMid
-    channel.eq.high.value = track.eqHigh
-    channel.send.gain.value = track.reverbSend
+    if (!this.hasAutomation(track, 'volume')) {
+      channel.gain.gain.value = computeTrackGain(track, tracks)
+    }
+    if (!this.hasAutomation(track, 'pan')) channel.panner.pan.value = track.pan
+    if (!this.hasAutomation(track, 'eqLow')) channel.eq.low.value = track.eqLow
+    if (!this.hasAutomation(track, 'eqMid')) channel.eq.mid.value = track.eqMid
+    if (!this.hasAutomation(track, 'eqHigh')) channel.eq.high.value = track.eqHigh
+    if (!this.hasAutomation(track, 'reverbSend')) channel.send.gain.value = track.reverbSend
+  }
+
+  // ------------------------------------------------------------ 自动化包络
+
+  /** 数据字段名 → Tone 参数节点（自动化排期与静态赋值共用同一张映射） */
+  private paramNode(channel: Channel, param: AutomationParam): AutomatableParam {
+    switch (param) {
+      case 'volume':
+        return channel.gain.gain
+      case 'pan':
+        return channel.panner.pan
+      case 'reverbSend':
+        return channel.send.gain
+      case 'eqLow':
+        return channel.eq.low
+      case 'eqMid':
+        return channel.eq.mid
+      default:
+        return channel.eq.high
+    }
+  }
+
+  /** 某参数是否存在自动化曲线（有曲线的参数不再用推子静态值覆盖） */
+  private hasAutomation(track: Track, param: AutomationParam): boolean {
+    const lane = track.automation?.find((l) => l.param === param)
+    return Boolean(lane && lane.points.length >= 2)
+  }
+
+  /**
+   * 清掉某条轨道已排期的自动化，并把参数复位到静态值。
+   * 自动化的关键点排期在 scheduleProject 里重建，这里只负责「擦干净」。
+   */
+  private resetAutomation(channel: Channel, track: Track): void {
+    for (const param of ['volume', 'pan', 'reverbSend', 'eqLow', 'eqMid', 'eqHigh'] as AutomationParam[]) {
+      const node = this.paramNode(channel, param)
+      // 先取消掉时间轴上所有已排期的事件，避免旧曲线继续生效
+      node.cancelScheduledValues(0)
+      if (this.hasAutomation(track, param)) continue
+      node.value = track[param]
+    }
+  }
+
+  /** 供 store 调用：自动化曲线改动后立即复位参数（新的曲线等下一次 syncNow 排期） */
+  updateTrackAutomation(track: Track): void {
+    const channel = this.channels.get(track.id)
+    if (!channel) return
+    this.resetAutomation(channel, track)
+    this.applyMix(channel, track, this.trackList.length > 0 ? this.trackList : [track])
+  }
+
+  /**
+   * 按曲线排期（实时播放）：每个关键点用 Transport 的音乐时间触发一次参数写入，
+   * 触发瞬间取 Tone 给的上下文时间，因此播放/循环/变速都不会错位。
+   */
+  private scheduleAutomation(channel: Channel, track: Track, ppq: number): void {
+    for (const lane of track.automation ?? []) {
+      this.scheduleLane(this.transport, this.paramNode(channel, lane.param), lane, ppq, this.noteEventIds)
+    }
+  }
+
+  // ------------------------------------------------------------ 侧链压缩
+
+  /**
+   * 侧链衰减的实时驱动（由 store 的心跳循环每帧调用一次）。
+   *
+   * Tone 的压缩器没有外部侧链输入，这里采用「包络跟随 + 增益衰减」的做法：
+   * 取侧链源轨道的实时电平，换算成应衰减的增益系数，再平滑地写到目标的 duck 节点上。
+   * 平滑系数按 release 时间折算，保证不会出现阶跃式的不自然衰减。
+   */
+  updateSidechain(deltaMs: number): void {
+    if (!this.graphReady) return
+    for (const track of this.trackList) {
+      const channel = this.channels.get(track.id)
+      if (!channel) continue
+      let target = 1
+      for (const effect of track.effects) {
+        if (!effect.enabled || effect.type !== 'compressor' || !effect.sidechain) continue
+        const source = this.channels.get(effect.sidechain.sourceTrackId)
+        if (!source) continue
+        const level = readMeter(source.meter)
+        // amount 是最大衰减量（dB）：检测电平越高，衰减越接近 amount
+        const reduction = Math.min(1, level * 2) * effect.sidechain.amount
+        target = Math.min(target, dbToGain(-reduction))
+      }
+      const timeConstant = this.sidechainRelease(track)
+      // 一阶平滑：时间常数与帧间隔的比值决定每帧靠近目标的比例
+      const alpha = 1 - Math.exp(-deltaMs / Math.max(1, timeConstant * 1000))
+      channel.sidechainEnv += (target - channel.sidechainEnv) * alpha
+      channel.duck.gain.value = channel.sidechainEnv
+    }
+  }
+
+  /** 取该轨道侧链设置里最大的恢复时间，作为平滑时间常数 */
+  private sidechainRelease(track: Track): number {
+    let release = 0.2
+    for (const effect of track.effects) {
+      if (effect.sidechain) release = Math.max(release, effect.sidechain.release)
+    }
+    return release
   }
 
   /** 单独设置某个均衡频段（供 UI 拖动时即时反馈） */
@@ -388,6 +572,7 @@ class AudioEngine {
     channel.instrument?.dispose()
     disposeEffectChain(channel.effects)
     channel.entry.dispose()
+    channel.duck.dispose()
     channel.eq.dispose()
     channel.panner.dispose()
     channel.gain.dispose()
@@ -425,6 +610,7 @@ class AudioEngine {
   scheduleProject(project: Project): void {
     if (!this.graphReady) return
     const t = this.transport
+    this.trackList = project.tracks
 
     for (const id of this.noteEventIds) t.clear(id)
     this.noteEventIds = []
@@ -435,6 +621,13 @@ class AudioEngine {
     for (const track of project.tracks) {
       const channel = this.channels.get(track.id)
       if (!channel) continue
+
+      // 先把旧曲线从参数时间轴上撤掉，再排期新曲线
+      this.resetAutomation(channel, track)
+      this.scheduleAutomation(channel, track, ppq)
+
+      // 编组轨自身不产生声音，只作为子轨的汇合点
+      if (track.kind === 'group') continue
 
       if (track.kind === 'audio') {
         this.scheduleClips(channel, track, ppq)
@@ -635,6 +828,16 @@ class AudioEngine {
     const t = this.transport
     t.stop()
     t.ticks = 0
+    // 回到起点后曲线尚未生效，把参数复位成推子上的静态值，避免停在曲线中途的数值
+    this.resetAllAutomation()
+  }
+
+  /** 把全部轨道的自动化参数复位到静态值（停止 / 跳转时调用） */
+  private resetAllAutomation(): void {
+    for (const track of this.trackList) {
+      const channel = this.channels.get(track.id)
+      if (channel) this.resetAutomation(channel, track)
+    }
   }
 
   /** 当前播放位置（拍），预备拍期间恒为 0 */
@@ -774,17 +977,224 @@ class AudioEngine {
   // ------------------------------------------------------------ 离线渲染 WAV
 
   /**
+   * 离线渲染时的一条轨道通道。
+   * 与实时 Channel 结构一一对应，但只保留渲染需要的节点，
+   * 这样「实时播放」和「导出 WAV」两条路径的信号链完全一致。
+   */
+  private buildOfflineChannel(
+    track: Track,
+    project: Project,
+    destination: Tone.ToneAudioNode,
+    reverbBus: Tone.Freeverb
+  ): OfflineChannel {
+    const gain = new Tone.Gain(computeTrackGain(track, project.tracks))
+    gain.connect(destination)
+
+    const send = new Tone.Gain(track.reverbSend)
+    gain.connect(send)
+    send.connect(reverbBus)
+
+    const panner = new Tone.Panner(track.pan)
+    panner.connect(gain)
+
+    const eq = new Tone.EQ3({ low: track.eqLow, mid: track.eqMid, high: track.eqHigh })
+    eq.connect(panner)
+
+    const duck = new Tone.Gain(1)
+    duck.connect(eq)
+
+    const entry = new Tone.Gain(1)
+    let node: Tone.ToneAudioNode = entry
+    for (const effect of track.effects) {
+      if (!effect.enabled) continue
+      const chainItem = buildEffectChain([effect])[0]
+      if (!chainItem) continue
+      node.connect(chainItem.node.input)
+      node = chainItem.node.output
+    }
+    node.connect(duck)
+
+    let instrument: InstrumentNode | null = null
+    let drum = false
+    if (track.kind === 'midi') {
+      const custom =
+        track.instrument === 'custom'
+          ? this.resolveCustomInstrument(project, track.customInstrumentId)
+          : null
+      const customKind = project.customInstruments?.find(
+        (c) => c.id === track.customInstrumentId
+      )?.kind
+      instrument = createInstrument(track.instrument, custom)
+      instrument.connect(entry)
+      drum = isDrumTrack(track.instrument, customKind)
+    }
+
+    return { entry, duck, gain, send, panner, eq, instrument, drum }
+  }
+
+  /** 离线通道的参数节点映射（与实时 paramNode 一致，供自动化排期复用） */
+  private offlineParamNode(channel: OfflineChannel, param: AutomationParam): AutomatableParam {
+    switch (param) {
+      case 'volume':
+        return channel.gain.gain
+      case 'pan':
+        return channel.panner.pan
+      case 'reverbSend':
+        return channel.send.gain
+      case 'eqLow':
+        return channel.eq.low
+      case 'eqMid':
+        return channel.eq.mid
+      default:
+        return channel.eq.high
+    }
+  }
+
+  /**
+   * 排期一条轨道的内容（音符 / 音频片段）。
+   * 离线渲染的主渲染与侧链预渲染都会复用这里，保证两遍渲染的内容完全一致。
+   */
+  private scheduleOfflineContent(
+    track: Track,
+    channel: OfflineChannel,
+    transport: ReturnType<typeof Tone.getTransport>,
+    secondsPerBeat: number
+  ): void {
+    if (track.kind === 'audio') {
+      for (const clip of track.clips) {
+        const pcm = getCachedPcm(clip.key)
+        if (!pcm) continue
+        const player = new Tone.Player({
+          url: pcmToAudioBuffer(pcm),
+          fadeIn: clip.fadeIn * secondsPerBeat,
+          fadeOut: clip.fadeOut * secondsPerBeat
+        })
+        const clipGain = new Tone.Gain(clip.gain)
+        player.connect(clipGain)
+        clipGain.connect(channel.entry)
+        player.sync().start(
+          beatsToTicks(clip.start, transport.PPQ),
+          clip.offset,
+          clip.duration * secondsPerBeat
+        )
+      }
+      return
+    }
+    if (!channel.instrument) return
+    const instrument = channel.instrument
+    const drum = channel.drum
+    for (const region of track.regions) {
+      for (const note of region.notes) {
+        const at = beatsToTicks(region.start + note.start, transport.PPQ)
+        const seconds = note.duration * secondsPerBeat
+        transport.schedule((time) => {
+          if (drum) instrument.triggerAttackRelease(note.midi, seconds, time, note.velocity)
+          else instrument.triggerAttackRelease(midiToNoteName(note.midi), seconds, time, note.velocity)
+        }, at)
+      }
+    }
+  }
+
+  /** 按曲线把参数排期到给定参数节点上（实时与离线共用，只是节点来源不同） */
+  private scheduleLane(
+    transport: ReturnType<typeof Tone.getTransport>,
+    node: AutomatableParam,
+    lane: AutomationLane,
+    ppq: number,
+    eventIds: number[] | null
+  ): void {
+    if (lane.points.length < 2) return
+    const first = lane.points[0]
+    const anchor = transport.schedule((time: number) => {
+      node.setValueAtTime(first.value, time)
+    }, beatsToTicks(first.beat, ppq))
+    if (eventIds) eventIds.push(anchor)
+    let prev = first
+    for (let i = 1; i < lane.points.length; i += 1) {
+      const point = lane.points[i]
+      const from = prev.value
+      const to = point.value
+      const id = transport.schedule((time: number) => {
+        // 先把上一段的目标值锚住，再斜坡到本点，保证线性插值有确定的起点
+        node.setValueAtTime(from, time)
+        node.linearRampToValueAtTime(to, time)
+      }, beatsToTicks(point.beat, ppq))
+      if (eventIds) eventIds.push(id)
+      prev = point
+    }
+  }
+
+  /**
+   * 预渲染「侧链源轨道」的电平包络。
+   *
+   * Tone 的压缩器没有原生侧链输入，所以实时播放时用逐帧包络跟随（见 updateSidechain）。
+   * 离线导出时无法逐帧干预，于是先把源轨道单独渲染一遍，
+   * 用 16 分音符为步长采样电平包络，再在主渲染里把它排期成 duck 节点的增益曲线，
+   * 这样导出的 WAV 同样带有侧链闪避，与实时听感一致。
+   * 工程里没有侧链时直接返回空表，不会产生额外渲染开销。
+   */
+  private async renderSidechainEnvelopes(
+    project: Project,
+    duration: number
+  ): Promise<Map<string, { time: number; gain: number }[]>> {
+    const result = new Map<string, { time: number; gain: number }[]>()
+    // 源轨道 → 该源上最大的衰减量（多个目标共用同一个源时取最大）
+    const sources = new Map<string, number>()
+    for (const track of project.tracks) {
+      for (const effect of track.effects) {
+        if (!effect.enabled || !effect.sidechain) continue
+        const id = effect.sidechain.sourceTrackId
+        sources.set(id, Math.max(sources.get(id) ?? 0, effect.sidechain.amount))
+      }
+    }
+    if (sources.size === 0) return result
+
+    const secondsPerBeat = 60 / project.bpm
+    this.trackList = project.tracks
+
+    for (const [sourceId, amount] of sources) {
+      const source = project.tracks.find((t) => t.id === sourceId)
+      if (!source) continue
+      const samples: { time: number; gain: number }[] = []
+
+      await Tone.Offline(({ transport }) => {
+        const sink = new Tone.Gain(1).toDestination()
+        const meter = new Tone.Meter({ normalRange: true, smoothing: 0.3 })
+        sink.connect(meter)
+        // 侧链源的单轨渲染：混响总线接了但不送回输出，只关心它的干声电平
+        const spareReverb = new Tone.Freeverb({ roomSize: 0.72, dampening: 2600, wet: 1 })
+        const channel = this.buildOfflineChannel(source, project, sink, spareReverb)
+        this.scheduleOfflineContent(source, channel, transport, secondsPerBeat)
+
+        transport.scheduleRepeat((time: number) => {
+          const level = Math.min(1, readMeter(meter) * 2)
+          samples.push({ time, gain: dbToGain(-level * amount) })
+        }, '16n')
+
+        transport.bpm.value = project.bpm
+        transport.timeSignature = timeSignatureParts(project.timeSignature)
+        transport.start(0)
+      }, duration)
+
+      result.set(sourceId, samples)
+    }
+    return result
+  }
+
+  /**
    * 用 Tone.Offline 离线渲染整个工程，返回 AudioBuffer。
    * 注意：Tone.Offline 执行期间全局上下文会临时切换到离线上下文，
    * 回调里拿到的 transport 属于该离线上下文，因此节点与排期都在回调内创建。
-   * 这里的信号链与实时播放保持一致（效果器 → 均衡 → 声像 → 推子 → 干声/混响总线 → 限幅）。
+   * 这里的信号链与实时播放保持一致（效果器 → 侧链衰减 → 均衡 → 声像 → 推子 → 编组/总线 → 限幅），
+   * 自动化曲线与侧链闪避也会一并渲染进去。
    */
   async renderToAudioBuffer(project: Project): Promise<AudioBuffer> {
-    const bpb = beatsPerBarOf(project.timeSignature)
     const totalBeats = this.projectLengthBeats(project)
     const secondsPerBeat = 60 / project.bpm
     // 额外留 2 秒混响尾巴
     const duration = totalBeats * secondsPerBeat + 2
+    const sidechainEnvelopes = await this.renderSidechainEnvelopes(project, duration)
+    this.trackList = project.tracks
 
     const rendered = await Tone.Offline(({ transport }) => {
       const dryBus = new Tone.Gain(1)
@@ -799,93 +1209,32 @@ class AudioEngine {
       master.connect(limiter)
       limiter.toDestination()
 
-      /** 每条轨道的统一入口（合成器 / 片段播放器都汇入这里） */
-      const entries = new Map<string, Tone.Gain>()
-      const instruments = new Map<string, InstrumentNode>()
-      /** 每条轨道是否按音号触发（鼓组），与实时链路保持一致 */
-      const channelDrumMap = new Map<string, boolean>()
-
-      for (const track of project.tracks) {
-        const gain = new Tone.Gain(computeTrackGain(track, project.tracks))
-        gain.connect(dryBus)
-
-        const send = new Tone.Gain(track.reverbSend)
-        gain.connect(send)
-        send.connect(reverbBus)
-
-        const panner = new Tone.Panner(track.pan)
-        panner.connect(gain)
-
-        const eq = new Tone.EQ3({ low: track.eqLow, mid: track.eqMid, high: track.eqHigh })
-        eq.connect(panner)
-
-        const entry = new Tone.Gain(1)
-        entries.set(track.id, entry)
-
-        // 与实时链路一致：入口 → 效果器链 → 均衡
-        let node: Tone.ToneAudioNode = entry
-        for (const effect of track.effects) {
-          if (!effect.enabled) continue
-          const chainItem = buildEffectChain([effect])[0]
-          if (!chainItem) continue
-          node.connect(chainItem.node.input)
-          node = chainItem.node.output
-        }
-        node.connect(eq)
-
-        if (track.kind === 'midi') {
-          const custom =
-            track.instrument === 'custom'
-              ? this.resolveCustomInstrument(project, track.customInstrumentId)
-              : null
-          const customKind = project.customInstruments?.find(
-            (c) => c.id === track.customInstrumentId
-          )?.kind
-          const instrument = createInstrument(track.instrument, custom)
-          instrument.connect(entry)
-          instruments.set(track.id, instrument)
-          channelDrumMap.set(track.id, isDrumTrack(track.instrument, customKind))
-        }
+      const channels = new Map<string, OfflineChannel>()
+      // 按层级建链，保证挂到编组上的子轨能找到父级入口
+      for (const track of this.orderByDepth(project.tracks)) {
+        const parent = track.parentId ? channels.get(track.parentId) : undefined
+        const destination = parent ? parent.entry : dryBus
+        channels.set(track.id, this.buildOfflineChannel(track, project, destination, reverbBus))
       }
 
       for (const track of project.tracks) {
-        const entry = entries.get(track.id)
-        if (!entry) continue
+        const channel = channels.get(track.id)
+        if (!channel) continue
 
-        if (track.kind === 'audio') {
-          for (const clip of track.clips) {
-            const pcm = getCachedPcm(clip.key)
-            if (!pcm) continue
-            const player = new Tone.Player({
-              url: pcmToAudioBuffer(pcm),
-              fadeIn: clip.fadeIn * secondsPerBeat,
-              fadeOut: clip.fadeOut * secondsPerBeat
-            })
-            const clipGain = new Tone.Gain(clip.gain)
-            player.connect(clipGain)
-            clipGain.connect(entry)
-            player.sync().start(
-              beatsToTicks(clip.start, transport.PPQ),
-              clip.offset,
-              clip.duration * secondsPerBeat
-            )
-          }
-          continue
+        // 自动化曲线：与实时播放共用同一条曲线
+        for (const lane of track.automation ?? []) {
+          this.scheduleLane(transport, this.offlineParamNode(channel, lane.param), lane, transport.PPQ, null)
         }
 
-        const instrument = instruments.get(track.id)
-        if (!instrument) continue
-        const drum = channelDrumMap.get(track.id) ?? false
-        for (const region of track.regions) {
-          for (const note of region.notes) {
-            const at = beatsToTicks(region.start + note.start, transport.PPQ)
-            const seconds = note.duration * secondsPerBeat
-            transport.schedule((time) => {
-              if (drum) instrument.triggerAttackRelease(note.midi, seconds, time, note.velocity)
-              else instrument.triggerAttackRelease(midiToNoteName(note.midi), seconds, time, note.velocity)
-            }, at)
-          }
+        // 侧链闪避：把预渲染得到的包络写进 duck 增益
+        const envelope = sidechainEnvelopes.get(track.id)
+        if (envelope) {
+          for (const item of envelope) channel.duck.gain.setValueAtTime(item.gain, item.time)
         }
+
+        // 编组轨自身没有内容，只作为子轨的汇合点
+        if (track.kind === 'group') continue
+        this.scheduleOfflineContent(track, channel, transport, secondsPerBeat)
       }
 
       transport.bpm.value = project.bpm
@@ -897,6 +1246,19 @@ class AudioEngine {
     if (!audioBuffer) throw new Error('离线渲染失败：未得到音频数据')
     return audioBuffer
   }
+}
+
+/** 离线渲染用的轨道通道（与实时 Channel 对应的最小集合） */
+interface OfflineChannel {
+  entry: Tone.Gain
+  duck: Tone.Gain
+  gain: Tone.Gain
+  /** 混响发送量节点：自动化「混响发送」直接写它的 gain */
+  send: Tone.Gain
+  panner: Tone.Panner
+  eq: Tone.EQ3
+  instrument: InstrumentNode | null
+  drum: boolean
 }
 
 /** 读取电平表数值并归一化到 0~1（normalRange 模式下已是 0~1，这里再做一次保护） */

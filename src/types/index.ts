@@ -110,8 +110,9 @@ export interface Region {
  * 轨道类型：
  * - midi：由内置合成器演奏，编辑对象是音符（钢琴卷帘）
  * - audio：由录音 / 导入的波形构成，编辑对象是音频片段（波形编辑器）
+ * - group：编组 / 总线轨，自身不发声，仅把子轨信号汇总后统一处理（效果链、均衡、推子）
  */
-export type TrackKind = 'midi' | 'audio'
+export type TrackKind = 'midi' | 'audio' | 'group'
 
 /**
  * 音频片段（波形）。
@@ -155,6 +156,16 @@ export interface TrackEffect {
   enabled: boolean
   /** 参数键 → 数值（键名与 EffectDef.params 对应） */
   params: Record<string, number>
+  /**
+   * 侧链压缩配置（仅 compressor 使用）：
+   * 用 sourceTrackId 这条轨道的电平包络去压低本轨增益，实现「kick 一响，pad 让路」的效果。
+   * amount 为最大衰减量（dB），release 为恢复时间（秒）。
+   */
+  sidechain?: {
+    sourceTrackId: string
+    amount: number
+    release: number
+  }
 }
 
 /** 单个可调参数的描述（供 UI 自动生成滑块） */
@@ -306,6 +317,163 @@ export interface LayoutConfig {
   panelWeight: Record<PanelId, number>
 }
 
+// ---------------------------------------------------------------- 自动化包络
+
+/** 均衡器增益范围（dB）；放在此处是因为自动化参数表在模块初始化时就会读它 */
+export const EQ_MIN = -18
+export const EQ_MAX = 18
+
+/** 总线限幅阈值范围（dB） */
+export const LIMITER_MIN = -24
+export const LIMITER_MAX = 0
+
+/**
+ * 可被自动化控制的轨道参数。
+ * 值域与 Track 上的同名字段一致（音量 0~1、声像 -1~1、发送 0~1、均衡 dB）。
+ */
+export type AutomationParam = 'volume' | 'pan' | 'reverbSend' | 'eqLow' | 'eqMid' | 'eqHigh'
+
+/** 自动化参数的可选清单（顺序即 UI 下拉框顺序） */
+export const AUTOMATION_PARAMS: {
+  key: AutomationParam
+  label: string
+  min: number
+  max: number
+  /** 默认值（该参数无自动化点时的静态值取 Track 字段） */
+  def: number
+}[] = [
+  { key: 'volume', label: '音量', min: 0, max: 1, def: 0.8 },
+  { key: 'pan', label: '声像', min: -1, max: 1, def: 0 },
+  { key: 'reverbSend', label: '混响发送', min: 0, max: 1, def: 0.2 },
+  { key: 'eqLow', label: '均衡·低', min: EQ_MIN, max: EQ_MAX, def: 0 },
+  { key: 'eqMid', label: '均衡·中', min: EQ_MIN, max: EQ_MAX, def: 0 },
+  { key: 'eqHigh', label: '均衡·高', min: EQ_MIN, max: EQ_MAX, def: 0 }
+]
+
+/** 自动化参数定义快速查找 */
+export const AUTOMATION_PARAM_MAP: Record<AutomationParam, (typeof AUTOMATION_PARAMS)[number]> =
+  AUTOMATION_PARAMS.reduce(
+    (map, item) => {
+      map[item.key] = item
+      return map
+    },
+    {} as Record<AutomationParam, (typeof AUTOMATION_PARAMS)[number]>
+  )
+
+/** 一个自动化关键点：位置（拍）+ 目标值 */
+export interface AutomationPoint {
+  id: string
+  /** 相对工程起点的位置（拍） */
+  beat: number
+  /** 目标值（按参数各自值域） */
+  value: number
+}
+
+/** 一条自动化曲线：一个参数对应一条，点之间用线性斜坡连接 */
+export interface AutomationLane {
+  param: AutomationParam
+  points: AutomationPoint[]
+}
+
+// ---------------------------------------------------------------- 音阶锁定
+
+/** 音阶类型（根音之外的音程结构，单位：半音） */
+export type ScaleType =
+  | 'chromatic'
+  | 'major'
+  | 'minor'
+  | 'harmonicMinor'
+  | 'dorian'
+  | 'mixolydian'
+  | 'pentatonicMajor'
+  | 'pentatonicMinor'
+  | 'blues'
+
+/** 音阶定义：名称 + 相对于根音的半音偏移（必须包含 0） */
+export interface ScaleDef {
+  type: ScaleType
+  label: string
+  intervals: number[]
+}
+
+export const SCALE_DEFS: ScaleDef[] = [
+  { type: 'chromatic', label: '十二平均律（不锁定）', intervals: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] },
+  { type: 'major', label: '大调', intervals: [0, 2, 4, 5, 7, 9, 11] },
+  { type: 'minor', label: '自然小调', intervals: [0, 2, 3, 5, 7, 8, 10] },
+  { type: 'harmonicMinor', label: '和声小调', intervals: [0, 2, 3, 5, 7, 8, 11] },
+  { type: 'dorian', label: '多利亚', intervals: [0, 2, 3, 5, 7, 9, 10] },
+  { type: 'mixolydian', label: '混合利底亚', intervals: [0, 2, 4, 5, 7, 9, 10] },
+  { type: 'pentatonicMajor', label: '大调五声', intervals: [0, 2, 4, 7, 9] },
+  { type: 'pentatonicMinor', label: '小调五声', intervals: [0, 3, 5, 7, 10] },
+  { type: 'blues', label: '布鲁斯', intervals: [0, 3, 5, 6, 7, 10] }
+]
+
+export const SCALE_DEF_MAP: Record<ScaleType, ScaleDef> = SCALE_DEFS.reduce(
+  (map, def) => {
+    map[def.type] = def
+    return map
+  },
+  {} as Record<ScaleType, ScaleDef>
+)
+
+/** 音阶设置：根音（MIDI 音号，通常取 0~11 + 12 的整八度） + 音阶类型 */
+export interface ScaleSetting {
+  /** 根音 MIDI 音号（界面限制在 C3~B3，即 48~59，便于统一） */
+  root: number
+  type: ScaleType
+}
+
+/** 音阶根音下拉框可选的十二个音名（对应 MIDI 48~59，即 C3~B3） */
+export const SCALE_ROOT_OPTIONS: { value: number; label: string }[] = [
+  'C',
+  'C#',
+  'D',
+  'D#',
+  'E',
+  'F',
+  'F#',
+  'G',
+  'G#',
+  'A',
+  'A#',
+  'B'
+].map((label, index) => ({ value: 48 + index, label }))
+
+/** 判断某个音高是否落在给定音阶内 */
+export function isInScale(midi: number, scale: ScaleSetting): boolean {
+  const def = SCALE_DEF_MAP[scale.type] ?? SCALE_DEF_MAP.major
+  const offset = (((midi - scale.root) % 12) + 12) % 12
+  return def.intervals.includes(offset)
+}
+
+/**
+ * 把音高吸附到音阶内：取最近的合法音高，距离相同时优先向下，
+ * 保证拖动音符时手感稳定、不会来回跳。
+ */
+export function snapMidiToScale(midi: number, scale: ScaleSetting): number {
+  const def = SCALE_DEF_MAP[scale.type] ?? SCALE_DEF_MAP.major
+  if (def.intervals.length >= 12) return midi
+  for (let delta = 0; delta <= 6; delta += 1) {
+    if (isInScale(midi - delta, scale)) return midi - delta
+    if (isInScale(midi + delta, scale)) return midi + delta
+  }
+  return midi
+}
+
+/** 把一组音高按音阶修正，返回修正后的结果（供「量化到音阶」使用） */
+export function quantizeMidiToScale(midi: number, scale: ScaleSetting): number {
+  return clampMidi(snapMidiToScale(midi, scale))
+}
+
+/**
+ * 音高合法性兜底（避免量化后越界）。
+ * 这里直接用钢琴卷帘的音高范围常量值（MIN_MIDI=12 / MAX_MIDI=96），
+ * 不从 utils/music 引入，避免 types 与 utils 之间形成循环依赖。
+ */
+function clampMidi(midi: number): number {
+  return Math.max(12, Math.min(96, midi))
+}
+
 /** 一条轨道（MIDI 乐器轨或音频轨） */
 export interface Track {
   id: string
@@ -338,6 +506,13 @@ export interface Track {
   regions: Region[]
   /** 音频轨的波形片段 */
   clips: AudioClip[]
+  /**
+   * 父编组轨 id：为空表示挂在主干总线上。
+   * 仅指向 kind === 'group' 的轨道，信号会先汇入父编组的入口再统一处理。
+   */
+  parentId: string
+  /** 自动化包络：每个可自动化参数最多一条曲线 */
+  automation: AutomationLane[]
 }
 
 /** 工程（可序列化为 JSON 存 localStorage / 导出文件） */
@@ -358,6 +533,8 @@ export interface Project {
   tracks: Track[]
   /** 工程内的自定义音源库（采样元信息；PCM 存放于 IndexedDB） */
   customInstruments: CustomInstrument[]
+  /** 音阶设置：音阶锁定开启时，写谱与拖动音符都会吸附到该音阶 */
+  scale: ScaleSetting
   createdAt: number
   updatedAt: number
 }
@@ -387,14 +564,6 @@ export type ViewMode = 'piano' | 'audio' | 'mixer'
  * - custom：管理自定义音源（导入采样、分配音号）
  */
 export type InstrumentManagerTab = 'builtin' | 'custom'
-
-/** 均衡器增益范围（dB） */
-export const EQ_MIN = -18
-export const EQ_MAX = 18
-
-/** 总线限幅阈值范围（dB） */
-export const LIMITER_MIN = -24
-export const LIMITER_MAX = 0
 
 /** 均衡器三个频段的展示信息 */
 export const EQ_BANDS: { key: EqBand; label: string }[] = [

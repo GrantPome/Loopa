@@ -18,6 +18,8 @@ import {
   removeEffect,
   resetEffect,
   setEffectParam,
+  setEffectSidechain,
+  state,
   toggleEffect
 } from '@/core/store'
 
@@ -66,6 +68,51 @@ function onModeChange(effect: TrackEffect, event: Event): void {
   const current = track.value
   if (!current) return
   setEffectParam(current.id, effect.id, 'mode', Number((event.target as HTMLSelectElement).value))
+}
+
+/** 侧链触发源候选：当前轨以外的全部轨道（用它们的电平去压低本轨增益） */
+const sidechainSources = computed(() =>
+  state.project.tracks.filter((t) => t.id !== track.value?.id)
+)
+
+/** 侧链衰减量的显示读数（默认值 12dB，与引擎侧默认一致） */
+function sidechainAmountText(effect: TrackEffect): string {
+  return `${Math.round(effect.sidechain?.amount ?? 12)}dB`
+}
+
+/** 侧链恢复时间的显示读数 */
+function sidechainReleaseText(effect: TrackEffect): string {
+  return `${(effect.sidechain?.release ?? 0.2).toFixed(2)}s`
+}
+
+/** 选择侧链触发源：选「关闭」时清除侧链配置 */
+function onSidechainSource(effect: TrackEffect, event: Event): void {
+  const current = track.value
+  if (!current) return
+  const source = (event.target as HTMLSelectElement).value
+  setEffectSidechain(
+    current.id,
+    effect.id,
+    source,
+    effect.sidechain?.amount ?? 12,
+    effect.sidechain?.release ?? 0.2
+  )
+}
+
+/** 调整侧链衰减量（dB） */
+function onSidechainAmount(effect: TrackEffect, event: Event): void {
+  const current = track.value
+  const sc = effect.sidechain
+  if (!current || !sc) return
+  setEffectSidechain(current.id, effect.id, sc.sourceTrackId, Number((event.target as HTMLInputElement).value), sc.release)
+}
+
+/** 调整侧链恢复时间（秒） */
+function onSidechainRelease(effect: TrackEffect, event: Event): void {
+  const current = track.value
+  const sc = effect.sidechain
+  if (!current || !sc) return
+  setEffectSidechain(current.id, effect.id, sc.sourceTrackId, sc.amount, Number((event.target as HTMLInputElement).value))
 }
 
 /** 数值读数：带单位，并按步长决定小数位数 */
@@ -151,6 +198,51 @@ function toggleExpand(effect: TrackEffect): void {
               />
               <span class="value">{{ displayValue(effect, def.key) }}</span>
             </div>
+
+            <!-- 侧链：用另一条轨道的电平压低本轨增益，实现「底鼓一响，铺底让路」 -->
+            <div v-if="effect.type === 'compressor'" class="sidechain">
+              <div class="param">
+                <span class="label">侧链源</span>
+                <select
+                  :value="effect.sidechain?.sourceTrackId ?? ''"
+                  title="选择用来触发衰减的轨道，选「关闭」即停用侧链"
+                  @change="onSidechainSource(effect, $event)"
+                >
+                  <option value="">关闭</option>
+                  <option v-for="t in sidechainSources" :key="t.id" :value="t.id">{{ t.name }}</option>
+                </select>
+                <span class="value" />
+              </div>
+              <template v-if="effect.sidechain">
+                <div class="param">
+                  <span class="label">衰减量</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="48"
+                    step="1"
+                    :value="effect.sidechain.amount"
+                    title="侧链最大衰减量 0~48dB"
+                    @input="onSidechainAmount(effect, $event)"
+                  />
+                  <span class="value">{{ sidechainAmountText(effect) }}</span>
+                </div>
+                <div class="param">
+                  <span class="label">恢复</span>
+                  <input
+                    type="range"
+                    min="0.01"
+                    max="2"
+                    step="0.01"
+                    :value="effect.sidechain.release"
+                    title="衰减后的恢复时间 0.01~2s"
+                    @input="onSidechainRelease(effect, $event)"
+                  />
+                  <span class="value">{{ sidechainReleaseText(effect) }}</span>
+                </div>
+              </template>
+            </div>
+
             <button class="reset" @click="onReset(effect)">重置参数</button>
           </div>
         </div>
@@ -322,6 +414,13 @@ function toggleExpand(effect: TrackEffect): void {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   flex: 0 0 auto;
+}
+
+/* 侧链配置区：与普通参数用虚线分隔，避免误认为是压缩器自带参数 */
+.sidechain {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line);
 }
 
 .reset {
