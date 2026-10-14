@@ -10,7 +10,7 @@ import TopToolbar from './components/TopToolbar.vue'
 import DockRegion from './components/DockRegion.vue'
 import ProjectDialog from './components/ProjectDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
-import CustomSoundDialog from './components/CustomSoundDialog.vue'
+import InstrumentDialog from './components/InstrumentDialog.vue'
 import {
   layout,
   layoutUi,
@@ -57,6 +57,15 @@ function onKeyDown(event: KeyboardEvent): void {
 
   // 布局编辑模式下锁定其余全部功能快捷键（撤销/重做、播放、删除、移调等），只能拖拽排序
   if (layoutUi.editMode) return
+
+  // 有弹窗打开时，除 Esc 外不响应主界面快捷键，避免在弹窗里误触发播放/删除等操作
+  if (state.instrumentOpen || state.settingsOpen || historyOpen.value) {
+    if (event.key === 'Escape') {
+      historyOpen.value = false
+      clearNoteSelection()
+    }
+    return
+  }
 
   // 撤销 / 重做：Ctrl+Z、Ctrl+Shift+Z、Ctrl+Y（Mac 上对应 ⌘）
   const mod = event.ctrlKey || event.metaKey
@@ -160,8 +169,12 @@ onBeforeUnmount(() => {
     </div>
 
     <ProjectDialog :open="historyOpen" @close="historyOpen = false" />
-    <SettingsDialog v-if="state.settingsOpen" />
-    <CustomSoundDialog v-if="state.customSoundOpen" />
+    <Transition name="mask-fade">
+      <SettingsDialog v-if="state.settingsOpen" />
+    </Transition>
+    <Transition name="mask-fade">
+      <InstrumentDialog v-if="state.instrumentOpen" />
+    </Transition>
   </div>
 </template>
 

@@ -381,6 +381,13 @@ export interface ProjectMeta {
  */
 export type ViewMode = 'piano' | 'audio' | 'mixer'
 
+/**
+ * 「乐器与音源」管理器的页签：
+ * - builtin：浏览内置乐器，试听并查看鼓件映射
+ * - custom：管理自定义音源（导入采样、分配音号）
+ */
+export type InstrumentManagerTab = 'builtin' | 'custom'
+
 /** 均衡器增益范围（dB） */
 export const EQ_MIN = -18
 export const EQ_MAX = 18

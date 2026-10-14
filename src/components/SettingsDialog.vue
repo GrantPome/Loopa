@@ -10,7 +10,7 @@ import { computed } from 'vue'
 import type { DeviceMode } from '@/types'
 import {
   closeSettings,
-  openCustomSound,
+  openInstrumentManager,
   setDeviceMode,
   setLongPressDuration,
   state,
@@ -60,10 +60,10 @@ function onResetLayout(): void {
   state.statusText = '已恢复默认布局'
 }
 
-/** 打开自定义音源管理：先关闭设置，避免两个对话框叠加 */
-function onOpenCustomSound(): void {
+/** 打开「乐器与音源」管理器：先关闭设置，避免两个对话框叠加 */
+function onOpenInstruments(): void {
   closeSettings()
-  openCustomSound()
+  openInstrumentManager()
   emit('close')
 }
 </script>
@@ -122,12 +122,12 @@ function onOpenCustomSound(): void {
         </section>
 
         <section class="group">
-          <h3>自定义音源</h3>
+          <h3>乐器与音源</h3>
           <p class="desc">
-            内置音色的采样并不齐全（例如鼓组只有踩镲、缺少吊镲）。导入自己的采样拼装成一套音源后，即可在轨道音色下拉框中选择使用。
+            在统一的管理器里浏览并试听全部内置音色，或导入自己的采样拼装成一套独立音源。内置音色的采样并不齐全（例如鼓组只有踩镲、缺少吊镲），可用自定义音源补齐。
           </p>
           <div class="row layout-row">
-            <button class="primary" @click="onOpenCustomSound">管理自定义音源</button>
+            <button class="primary" @click="onOpenInstruments">打开乐器与音源管理器</button>
           </div>
         </section>
 
@@ -209,6 +209,8 @@ function onOpenCustomSound(): void {
   display: flex;
   flex-direction: column;
   box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  /* 挂载时上浮淡入 */
+  animation: dialog-rise-in 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .head {

@@ -175,3 +175,82 @@ input[type='range']:hover::-webkit-slider-thumb {
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/* ==================== 通用过渡动画 ====================
+ * 抽成全局类，供弹窗、页签切换、列表增删复用，保证各处手感一致。
+ */
+
+/* 遮罩层：淡入淡出 */
+.mask-fade-enter-active {
+  transition: opacity 0.24s ease;
+}
+.mask-fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+.mask-fade-enter-from,
+.mask-fade-leave-to {
+  opacity: 0;
+}
+
+/* 弹窗主体：挂载时自下而上浮入（配合遮罩淡入） */
+@keyframes dialog-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 页签内容切换：旧内容左退、新内容右进 */
+.panel-swap-enter-active {
+  transition: opacity 0.24s ease, transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.panel-swap-leave-active {
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+.panel-swap-enter-from {
+  opacity: 0;
+  transform: translateX(12px);
+}
+.panel-swap-leave-to {
+  opacity: 0;
+  transform: translateX(-10px);
+}
+
+/* 列表项增删：淡入上浮，其余项平滑让位 */
+.list-pop-enter-active {
+  transition: opacity 0.24s ease, transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.list-pop-leave-active {
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+.list-pop-enter-from {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+.list-pop-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+.list-pop-move {
+  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 尊重系统「减少动态效果」偏好：关闭上述过渡 */
+@media (prefers-reduced-motion: reduce) {
+  .mask-fade-enter-active,
+  .mask-fade-leave-active,
+  .panel-swap-enter-active,
+  .panel-swap-leave-active,
+  .list-pop-enter-active,
+  .list-pop-leave-active,
+  .list-pop-move {
+    transition: none;
+  }
+  .dialog {
+    animation: none;
+  }
+}

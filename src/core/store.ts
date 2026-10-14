@@ -7,6 +7,7 @@ import type {
   EffectType,
   EqBand,
   GridDivision,
+  InstrumentManagerTab,
   InstrumentType,
   Note,
   Project,
@@ -124,8 +125,10 @@ export interface AppState {
   deviceMode: DeviceMode
   /** 设置对话框是否打开 */
   settingsOpen: boolean
-  /** 自定义音源管理对话框是否打开 */
-  customSoundOpen: boolean
+  /** 「乐器与音源」管理器是否打开 */
+  instrumentOpen: boolean
+  /** 管理器当前展示的页签 */
+  instrumentTab: InstrumentManagerTab
   /** Pad 端长按触发时间（ms）：超过该时长即视为长按，用于启动框选或弹出右键菜单 */
   longPressDuration: number
   /** Pad 端是否在底部常驻显示虚拟键盘（PC 端默认折叠） */
@@ -390,7 +393,8 @@ export const state = reactive<AppState>({
   volumeDisplay: 'db',
   deviceMode: 'pc',
   settingsOpen: false,
-  customSoundOpen: false,
+  instrumentOpen: false,
+  instrumentTab: 'builtin',
   longPressDuration: 450,
   touchKeyboardAlwaysOn: true,
   levels: {},
@@ -1650,13 +1654,47 @@ export async function previewCustomSample(key: string): Promise<void> {
   engine.previewSample(key)
 }
 
-/** 打开 / 关闭自定义音源管理对话框 */
-export function openCustomSound(): void {
-  state.customSoundOpen = true
+/**
+ * 打开「乐器与音源」管理器。
+ * tab 用于指定进入时展示的页签：内置乐器 / 自定义音源。
+ */
+export function openInstrumentManager(tab: InstrumentManagerTab = 'builtin'): void {
+  state.instrumentTab = tab
+  state.instrumentOpen = true
 }
 
-export function closeCustomSound(): void {
-  state.customSoundOpen = false
+export function closeInstrumentManager(): void {
+  state.instrumentOpen = false
+  // 关窗时立刻收掉试听声音，避免管理器关闭后还在响
+  engine.stopAudition()
+}
+
+/** 切换管理器页签（页签指示块动画由组件侧驱动） */
+export function setInstrumentTab(tab: InstrumentManagerTab): void {
+  state.instrumentTab = tab
+}
+
+/**
+ * 试听一个音色：内置音色直接播放示范乐句，
+ * 自定义音源按其采样播放（鼓组打一小段鼓点，旋律走分解和弦）。
+ */
+export async function previewInstrument(type: InstrumentType, customInstrumentId = ''): Promise<void> {
+  await ensureAudio()
+  engine.previewVoice(type, state.project, customInstrumentId)
+}
+
+/**
+ * 把音色应用到当前选中的 MIDI 轨道。
+ * 返回 false 表示当前没有可用的 MIDI 轨道（例如选中的是音频轨）。
+ */
+export function applyInstrumentToActiveTrack(
+  type: InstrumentType,
+  customInstrumentId = ''
+): boolean {
+  const track = activeTrack()
+  if (!track || track.kind !== 'midi') return false
+  setTrackInstrument(track.id, type, customInstrumentId)
+  return true
 }
 
 // ------------------------------------------------------------ 工程级设置

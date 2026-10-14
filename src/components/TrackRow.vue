@@ -8,7 +8,7 @@ import { INSTRUMENT_OPTIONS } from '@/types'
 import {
   state,
   moveTrack,
-  openCustomSound,
+  openInstrumentManager,
   removeTrack,
   renameTrack,
   selectTrack,
@@ -49,7 +49,7 @@ const instrumentValue = computed(() =>
     : props.track.instrument
 )
 
-/** 「管理自定义音源」哨兵值：选中后打开管理对话框并还原选择 */
+/** 「管理乐器与音源」哨兵值：选中后打开管理器并还原选择 */
 const MANAGE_VALUE = '__manage__'
 
 function onNameChange(event: Event): void {
@@ -60,7 +60,7 @@ function onInstrumentChange(event: Event): void {
   const select = event.target as HTMLSelectElement
   const value = select.value
   if (value === MANAGE_VALUE) {
-    openCustomSound()
+    openInstrumentManager()
     // 该选项不是真实音色，还原下拉框显示，避免轨道被误改为空音色
     select.value = instrumentValue.value
     return
@@ -101,7 +101,7 @@ function onPanInput(event: Event): void {
             {{ ci.name }}（{{ ci.kind === 'drum' ? '鼓组' : '旋律' }}）
           </option>
         </optgroup>
-        <option :value="MANAGE_VALUE">管理自定义音源…</option>
+        <option :value="MANAGE_VALUE">管理乐器与音源…</option>
       </select>
       <template v-else>
         <span class="badge">音频</span>

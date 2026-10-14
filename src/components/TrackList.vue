@@ -11,7 +11,7 @@ import {
   addAudioTrack,
   addTrack,
   importAudioFile,
-  openCustomSound,
+  openInstrumentManager,
   state,
   toggleVolumeDisplay
 } from '@/core/store'
@@ -21,17 +21,17 @@ import TrackRow from './TrackRow.vue'
 const newInstrument = ref<string>('piano')
 const audioInput = ref<HTMLInputElement | null>(null)
 
-/** 「管理自定义音源」哨兵值 */
+/** 「管理乐器与音源」哨兵值 */
 const MANAGE_VALUE = '__manage__'
 
 /** 工程内的自定义音源 */
 const customInstruments = computed(() => state.project.customInstruments)
 
-/** 新增轨道：解析下拉框的值（内置音色 / 自定义音源 / 打开管理对话框） */
+/** 新增轨道：解析下拉框的值（内置音色 / 自定义音源 / 打开管理器） */
 function onAddTrack(): void {
   const value = newInstrument.value
   if (value === MANAGE_VALUE) {
-    openCustomSound()
+    openInstrumentManager()
     newInstrument.value = 'piano'
     return
   }
@@ -87,7 +87,7 @@ async function onAudioChange(event: Event): Promise<void> {
             {{ ci.name }}（{{ ci.kind === 'drum' ? '鼓组' : '旋律' }}）
           </option>
         </optgroup>
-        <option :value="MANAGE_VALUE">管理自定义音源…</option>
+        <option :value="MANAGE_VALUE">管理乐器与音源…</option>
       </select>
       <button title="新增 MIDI 乐器轨道" @click="onAddTrack">＋</button>
     </div>

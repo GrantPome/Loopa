@@ -1,5 +1,5 @@
 import * as Tone from 'tone'
-import type { EqBand, Project, TimeSignature, Track, TrackEffect } from '@/types'
+import type { EqBand, InstrumentType, Project, TimeSignature, Track, TrackEffect } from '@/types'
 import {
   beatsPerBarOf,
   beatsToTicks,
@@ -128,6 +128,8 @@ class AudioEngine {
   private clipPlayers: { player: Tone.Player; gain: Tone.Gain }[] = []
   /** 采样键 → AudioBuffer 缓存，避免每次重排都重新拷贝整段采样 */
   private bufferCache = new Map<string, AudioBuffer>()
+  /** 当前试听中的临时乐器（管理器里点「试听」时创建，播完自动释放） */
+  private audition: { instrument: InstrumentNode; gain: Tone.Gain; timer: number } | null = null
 
   private metronomeOn = false
   private countInOn = false
@@ -708,6 +710,65 @@ class AudioEngine {
       player.dispose()
       gain.dispose()
     }
+  }
+
+  // -------------------------------------------------------- 乐器 / 音源试听
+
+  /**
+   * 试听任意音色（供「乐器与音源」管理器使用）：
+   * 临时构建一个乐器节点接到干声总线，播放一小段示范乐句后自动释放。
+   * 内置音色直接构建；自定义音源按工程数据解析出已解码的采样。
+   */
+  previewVoice(type: InstrumentType, project: Project, customInstrumentId = ''): void {
+    if (!this.graphReady) return
+    const custom =
+      type === 'custom' ? this.resolveCustomInstrument(project, customInstrumentId) : null
+    const drum = isDrumTrack(type, custom?.kind)
+
+    // 同一时间只保留一条试听声音，避免连续点击叠成一片
+    this.stopAudition()
+
+    const instrument = createInstrument(type, custom)
+    const gain = new Tone.Gain(1)
+    instrument.connect(gain)
+    gain.connect(this.dryBus)
+
+    const now = Tone.getContext().currentTime
+    if (drum) {
+      // 一小段鼓点：底鼓 → 军鼓 → 闭合踩镲 → 开镲 → 吊镲（大擦）
+      const hits: [number, number][] = [
+        [36, 0],
+        [38, 0.3],
+        [42, 0.6],
+        [46, 0.85],
+        [49, 1.15]
+      ]
+      hits.forEach(([midi, offset]) => instrument.triggerAttackRelease(midi, 0.4, now + offset, 0.9))
+    } else {
+      // 上行分解和弦：C4 E4 G4 C5，便于听清起音与延音
+      const notes = [60, 64, 67, 72]
+      notes.forEach((midi, index) =>
+        instrument.triggerAttackRelease(midiToNoteName(midi), 0.75, now + index * 0.14, 0.85)
+      )
+    }
+
+    // 等乐句自然收尾后再释放临时节点，避免声音被硬切断
+    const lifetime = drum ? 2800 : 1900
+    const timer = window.setTimeout(() => {
+      // 期间若已开始新的试听，这里不再重复释放
+      if (this.audition?.timer !== timer) return
+      this.stopAudition()
+    }, lifetime)
+    this.audition = { instrument, gain, timer }
+  }
+
+  /** 停止并释放当前试听的临时乐器（关闭管理器时也应调用） */
+  stopAudition(): void {
+    if (!this.audition) return
+    window.clearTimeout(this.audition.timer)
+    this.audition.instrument.dispose()
+    this.audition.gain.dispose()
+    this.audition = null
   }
 
   // ------------------------------------------------------------ 离线渲染 WAV

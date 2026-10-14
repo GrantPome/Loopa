@@ -4,7 +4,7 @@
  * 品牌与工程名 / 文件与导出下拉 / 播放与录音 / 撤销重做 / BPM 与拍号 /
  * 节拍器 / 视图切换（分段 Tab）
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   state,
   historyUi,
@@ -32,6 +32,7 @@ import {
 import { TIME_SIGNATURE_OPTIONS } from '@/types'
 import type { TimeSignature, ViewMode } from '@/types'
 import { layoutUi } from '@/core/layout'
+import { useSegThumb } from '@/core/segThumb'
 import { beatsPerBarOf, formatPosition } from '@/utils/music'
 
 const emit = defineEmits<{ (e: 'open-history'): void }>()
@@ -118,67 +119,11 @@ const VIEW_TABS: { id: ViewMode; label: string; title: string }[] = [
   { id: 'mixer', label: '混音台', title: '混音台：音量、声像、均衡、混响发送' }
 ]
 
-const tabEls = ref<Record<string, HTMLElement | null>>({})
-const thumbEl = ref<HTMLElement | null>(null)
-
-/** 指示块当前的位置与宽度，作为两段式动画的起点 */
-let thumbLeft = 0
-let thumbWidth = 0
-let thumbReady = false
-let thumbTimer = 0
-
-function setTabRef(el: unknown, id: ViewMode): void {
-  tabEls.value[id] = (el as HTMLElement | null) ?? null
-}
-
 /**
- * 移动分段 Tab 的选中指示块。
- * animate=true 时采用两段式：先把指示块拉伸覆盖「旧位置 → 新位置」的整段，
- * 再收拢到目标 tab，形成「先伸长、快到位时回缩」的流畅手感。
+ * 分段 Tab 的滑动指示块：复用 core/segThumb 里的两段式动画，
+ * 与「乐器与音源」管理器的页签保持一致的手感。
  */
-function moveThumb(animate: boolean): void {
-  const el = tabEls.value[state.viewMode]
-  const thumb = thumbEl.value
-  if (!el || !thumb) return
-  const nextLeft = el.offsetLeft
-  const nextWidth = el.offsetWidth
-
-  if (!animate || !thumbReady) {
-    thumb.style.transition = 'none'
-    thumb.style.left = `${nextLeft}px`
-    thumb.style.width = `${nextWidth}px`
-    thumbLeft = nextLeft
-    thumbWidth = nextWidth
-    thumbReady = true
-    return
-  }
-
-  const stretchedLeft = Math.min(thumbLeft, nextLeft)
-  const stretchedWidth = Math.max(thumbLeft + thumbWidth, nextLeft + nextWidth) - stretchedLeft
-  thumb.style.transition = 'left 0.16s cubic-bezier(0.4, 0, 0.2, 1), width 0.16s cubic-bezier(0.4, 0, 0.2, 1)'
-  thumb.style.left = `${stretchedLeft}px`
-  thumb.style.width = `${stretchedWidth}px`
-  thumbLeft = nextLeft
-  thumbWidth = nextWidth
-
-  window.clearTimeout(thumbTimer)
-  thumbTimer = window.setTimeout(() => {
-    const t = thumbEl.value
-    if (!t) return
-    t.style.transition = 'left 0.24s cubic-bezier(0.22, 1, 0.36, 1), width 0.24s cubic-bezier(0.22, 1, 0.36, 1)'
-    t.style.left = `${nextLeft}px`
-    t.style.width = `${nextWidth}px`
-  }, 160)
-}
-
-watch(
-  () => state.viewMode,
-  () => moveThumb(true)
-)
-
-function onResize(): void {
-  moveThumb(false)
-}
+const { thumbEl, setTabRef } = useSegThumb(() => state.viewMode)
 // ---------------------------------------------------------------- 工程参数与显示
 
 const bpb = computed(() => beatsPerBarOf(state.project.timeSignature))
@@ -235,18 +180,11 @@ function onDocKeydown(event: KeyboardEvent): void {
 onMounted(() => {
   document.addEventListener('pointerdown', onDocPointerDown)
   document.addEventListener('keydown', onDocKeydown)
-  window.addEventListener('resize', onResize)
-  // 首帧后各 tab 已完成布局，定位指示块（不带动画）
-  requestAnimationFrame(() => moveThumb(false))
-  // 字体加载完成后文字宽度可能变化，重新定位一次
-  if (document.fonts) document.fonts.ready.then(() => moveThumb(false)).catch(() => {})
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onDocPointerDown)
   document.removeEventListener('keydown', onDocKeydown)
-  window.removeEventListener('resize', onResize)
-  window.clearTimeout(thumbTimer)
 })
 </script>
 

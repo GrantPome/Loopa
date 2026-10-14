@@ -24,32 +24,41 @@ function formatTime(timestamp: number): string {
 </script>
 
 <template>
-  <div v-if="open" class="mask" @click.self="emit('close')">
-    <div class="dialog">
-      <header class="head">
-        <strong>历史工程</strong>
-        <span class="dim">共 {{ state.savedProjects.length }} 个（最多保留 12 个）</span>
-        <span class="gap" />
-        <button @click="emit('close')">关闭</button>
-      </header>
+  <Transition name="mask-fade">
+    <div v-if="open" class="mask" @click.self="emit('close')">
+      <div class="dialog">
+        <header class="head">
+          <strong>历史工程</strong>
+          <span class="dim">共 {{ state.savedProjects.length }} 个（最多保留 12 个）</span>
+          <span class="gap" />
+          <button @click="emit('close')">关闭</button>
+        </header>
 
-      <div class="list">
-        <div v-for="item in state.savedProjects" :key="item.id" class="item" :class="{ current: item.id === state.project.id }">
-          <div class="info">
-            <div class="name">{{ item.name }}</div>
-            <div class="meta">
-              {{ item.bpm }} BPM · {{ item.timeSignature }} · {{ item.trackCount }} 轨 · {{ item.noteCount }} 音符
+        <div class="list">
+          <TransitionGroup name="list-pop">
+            <div
+              v-for="item in state.savedProjects"
+              :key="item.id"
+              class="item"
+              :class="{ current: item.id === state.project.id }"
+            >
+              <div class="info">
+                <div class="name">{{ item.name }}</div>
+                <div class="meta">
+                  {{ item.bpm }} BPM · {{ item.timeSignature }} · {{ item.trackCount }} 轨 · {{ item.noteCount }} 音符
+                </div>
+                <div class="meta">{{ formatTime(item.updatedAt) }}</div>
+              </div>
+              <button class="primary" @click="onLoad(item.id)">加载</button>
+              <button class="danger" title="删除该工程" @click="onDelete(item.id)">删除</button>
             </div>
-            <div class="meta">{{ formatTime(item.updatedAt) }}</div>
-          </div>
-          <button class="primary" @click="onLoad(item.id)">加载</button>
-          <button class="danger" title="删除该工程" @click="onDelete(item.id)">删除</button>
-        </div>
+          </TransitionGroup>
 
-        <p v-if="!state.savedProjects.length" class="empty">还没有保存过的工程</p>
+          <p v-if="!state.savedProjects.length" class="empty">还没有保存过的工程</p>
+        </div>
       </div>
     </div>
-  </div>
+  </Transition>
 </template>
 
 <style scoped>
@@ -73,6 +82,8 @@ function formatTime(timestamp: number): string {
   border-radius: 8px;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
   overflow: hidden;
+  /* 挂载时上浮淡入 */
+  animation: dialog-rise-in 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .head {

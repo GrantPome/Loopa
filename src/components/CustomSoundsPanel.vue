@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 自定义音源管理对话框
+ * 自定义音源面板（「乐器与音源」管理器的第二个页签）
  *
  * 用途：内置音色的采样并不齐全（例如鼓组只有踩镲、缺少吊镲），
  * 这里允许用户导入自己的采样，拼装成一套独立音色供轨道使用。
@@ -16,7 +16,6 @@ import type { CustomInstrumentKind, CustomSample } from '@/types'
 import { GM_DRUM_NOTES, drumNoteLabel } from '@/types'
 import {
   addCustomInstrument,
-  closeCustomSound,
   importCustomSampleFile,
   previewCustomSample,
   removeCustomInstrument,
@@ -58,24 +57,23 @@ function samplePitchLabel(sample: CustomSample): string {
   return midiToNoteName(sample.rootMidi)
 }
 
-// 对话框每次打开时自动选中第一套音源，避免右侧空白
+/** 统计引用某套音源的轨道数（删除前提示用） */
+function trackCountOf(id: string): number {
+  return state.project.tracks.filter(
+    (t) => t.kind === 'midi' && t.instrument === 'custom' && t.customInstrumentId === id
+  ).length
+}
+
+// 首次渲染时自动选中第一套音源，避免右侧空白
 watch(
-  () => state.customSoundOpen,
-  (open) => {
-    if (!open) return
+  instruments,
+  () => {
     if (!instruments.value.some((c) => c.id === selectedId.value)) {
       selectedId.value = instruments.value[0]?.id ?? ''
     }
   },
   { immediate: true }
 )
-
-// 选中的音源被删除后回退到第一套
-watch(instruments, () => {
-  if (!instruments.value.some((c) => c.id === selectedId.value)) {
-    selectedId.value = instruments.value[0]?.id ?? ''
-  }
-})
 
 function onCreate(): void {
   const id = addCustomInstrument(newName.value, newKind.value)
@@ -90,7 +88,10 @@ function onRename(event: Event): void {
 
 function onKindChange(event: Event): void {
   if (!selected.value) return
-  setCustomInstrumentKind(selected.value.id, (event.target as HTMLSelectElement).value as CustomInstrumentKind)
+  setCustomInstrumentKind(
+    selected.value.id,
+    (event.target as HTMLSelectElement).value as CustomInstrumentKind
+  )
 }
 
 function onGainInput(event: Event): void {
@@ -150,107 +151,104 @@ function onRemoveSample(sample: CustomSample): void {
 }
 
 function onRemoveInstrument(): void {
-  if (!selected.value) return
-  const name = selected.value.name
-  if (!window.confirm(`确定删除自定义音源「${name}」？引用它的轨道会回退为内置钢琴。`)) return
-  void removeCustomInstrument(selected.value.id)
-}
-
-function onClose(): void {
-  closeCustomSound()
+  const instrument = selected.value
+  if (!instrument) return
+  const used = trackCountOf(instrument.id)
+  const warn = used
+    ? `确定删除自定义音源「${instrument.name}」？有 ${used} 条轨道正在使用它，会被回退为内置钢琴。`
+    : `确定删除自定义音源「${instrument.name}」？`
+  if (!window.confirm(warn)) return
+  void removeCustomInstrument(instrument.id)
 }
 </script>
 
 <template>
-  <div class="overlay" @click.self="onClose">
-    <div class="dialog">
-      <header class="head">
-        <span class="title">自定义音源</span>
-        <button class="close" title="关闭" @click="onClose">✕</button>
-      </header>
+  <div class="panel">
+    <!-- 左：音源列表 + 新建 -->
+    <aside class="list-col">
+      <div class="new-box">
+        <input
+          v-model="newName"
+          class="new-name"
+          placeholder="新音源名称"
+          title="自定义音源名称"
+          @keydown.enter="onCreate"
+        />
+        <select v-model="newKind" class="new-kind" title="音源类型">
+          <option v-for="opt in kindOptions" :key="opt.value" :value="opt.value">
+            {{ opt.label }}
+          </option>
+        </select>
+        <button class="primary block" title="新建自定义音源" @click="onCreate">＋ 新建音源</button>
+      </div>
 
-      <div class="body">
-        <!-- 左：音源列表 + 新建 -->
-        <aside class="list-col">
-          <div class="new-box">
-            <input
-              v-model="newName"
-              class="new-name"
-              placeholder="新音源名称"
-              title="自定义音源名称"
-              @keydown.enter="onCreate"
-            />
-            <select v-model="newKind" class="new-kind" title="音源类型">
+      <div class="list">
+        <TransitionGroup name="list-pop">
+          <button
+            v-for="ci in instruments"
+            :key="ci.id"
+            class="item"
+            :class="{ active: ci.id === selectedId }"
+            @click="selectedId = ci.id"
+          >
+            <span class="item-name">{{ ci.name }}</span>
+            <span class="item-meta">
+              {{ ci.kind === 'drum' ? '鼓组' : '旋律' }} · {{ ci.samples.length }} 采样
+            </span>
+          </button>
+        </TransitionGroup>
+        <p v-if="!instruments.length" class="empty">还没有自定义音源，先在上方新建一套。</p>
+      </div>
+    </aside>
+
+    <!-- 右：选中音源的编辑器 -->
+    <section class="edit-col">
+      <Transition name="panel-swap" mode="out-in">
+        <div v-if="selected" :key="selected.id" class="edit-inner">
+          <div class="field">
+            <span class="label">名称</span>
+            <input class="grow" :value="selected.name" title="音源名称" @change="onRename" />
+          </div>
+
+          <div class="field">
+            <span class="label">类型</span>
+            <select class="grow" :value="selected.kind" @change="onKindChange">
               <option v-for="opt in kindOptions" :key="opt.value" :value="opt.value">
                 {{ opt.label }}
               </option>
             </select>
-            <button class="primary block" title="新建自定义音源" @click="onCreate">＋ 新建音源</button>
+          </div>
+          <p class="hint">{{ kindDesc(selected.kind) }}</p>
+
+          <div class="field">
+            <span class="label">整体增益</span>
+            <input
+              class="grow"
+              type="range"
+              min="0"
+              max="2"
+              step="0.01"
+              :value="selected.gain"
+              @input="onGainInput"
+            />
+            <span class="value">{{ Math.round(selected.gain * 100) }}%</span>
           </div>
 
-          <div class="list">
-            <button
-              v-for="ci in instruments"
-              :key="ci.id"
-              class="item"
-              :class="{ active: ci.id === selectedId }"
-              @click="selectedId = ci.id"
-            >
-              <span class="item-name">{{ ci.name }}</span>
-              <span class="item-meta">{{ ci.kind === 'drum' ? '鼓组' : '旋律' }} · {{ ci.samples.length }} 采样</span>
-            </button>
-            <p v-if="!instruments.length" class="empty">
-              还没有自定义音源，先在左上角新建一套。
-            </p>
+          <div class="samples-head">
+            <span class="samples-title">采样（{{ selected.samples.length }}）</span>
+            <button class="primary" title="导入音频文件作为采样" @click="onPickFile">＋ 添加采样</button>
+            <input
+              ref="fileInput"
+              type="file"
+              accept="audio/*"
+              multiple
+              class="hidden-file"
+              @change="onFileChange"
+            />
           </div>
-        </aside>
 
-        <!-- 右：选中音源的编辑器 -->
-        <section class="edit-col">
-          <template v-if="selected">
-            <div class="field">
-              <span class="label">名称</span>
-              <input class="grow" :value="selected.name" title="音源名称" @change="onRename" />
-            </div>
-
-            <div class="field">
-              <span class="label">类型</span>
-              <select class="grow" :value="selected.kind" @change="onKindChange">
-                <option v-for="opt in kindOptions" :key="opt.value" :value="opt.value">
-                  {{ opt.label }}
-                </option>
-              </select>
-            </div>
-            <p class="hint">{{ kindDesc(selected.kind) }}</p>
-
-            <div class="field">
-              <span class="label">整体增益</span>
-              <input
-                class="grow"
-                type="range"
-                min="0"
-                max="2"
-                step="0.01"
-                :value="selected.gain"
-                @input="onGainInput"
-              />
-              <span class="value">{{ Math.round(selected.gain * 100) }}%</span>
-            </div>
-
-            <div class="samples-head">
-              <span class="samples-title">采样（{{ selected.samples.length }}）</span>
-              <button class="primary" title="导入音频文件作为采样" @click="onPickFile">＋ 添加采样</button>
-              <input
-                ref="fileInput"
-                type="file"
-                accept="audio/*"
-                multiple
-                class="hidden-file"
-                @change="onFileChange"
-              />
-            </div>
-
-            <div class="samples">
+          <div class="samples">
+            <TransitionGroup name="list-pop">
               <div v-for="sample in selected.samples" :key="sample.id" class="sample">
                 <div class="sample-top">
                   <input
@@ -307,76 +305,30 @@ function onClose(): void {
                   <span class="value">{{ Math.round(sample.gain * 100) }}%</span>
                 </div>
               </div>
+            </TransitionGroup>
 
-              <p v-if="!selected.samples.length" class="empty">
-                还没有采样，点「＋ 添加采样」导入音频文件（wav / mp3 / ogg 均可）。
-              </p>
-            </div>
+            <p v-if="!selected.samples.length" class="empty">
+              还没有采样，点「＋ 添加采样」导入音频文件（wav / mp3 / ogg 均可）。
+            </p>
+          </div>
 
-            <div class="edit-foot">
-              <button class="danger-btn" title="删除整套音源" @click="onRemoveInstrument">
-                删除这套音源
-              </button>
-            </div>
-          </template>
+          <div class="edit-foot">
+            <button class="danger-btn" title="删除整套音源" @click="onRemoveInstrument">
+              删除这套音源
+            </button>
+          </div>
+        </div>
 
-          <p v-else class="empty placeholder">
-            选择左侧的一套音源进行编辑，或新建一套。
-          </p>
-        </section>
-      </div>
-
-      <footer class="foot">
-        <span class="tip">{{ state.statusText }}</span>
-        <button class="primary" @click="onClose">完成</button>
-      </footer>
-    </div>
+        <p v-else key="empty" class="empty placeholder">选择左侧的一套音源进行编辑，或新建一套。</p>
+      </Transition>
+    </section>
   </div>
 </template>
 
 <style scoped>
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  backdrop-filter: blur(2px);
-}
-
-.dialog {
-  width: 680px;
-  max-width: calc(100vw - 32px);
-  max-height: calc(100vh - 48px);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
-}
-
-.head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--line);
-}
-
-.title {
-  font-weight: 600;
-}
-
-.close {
-  padding: 2px 8px;
-  font-size: 13px;
-}
-
-.body {
+.panel {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
 }
@@ -398,14 +350,8 @@ function onClose(): void {
   border-bottom: 1px solid var(--line);
 }
 
-.new-name {
-  width: 100%;
-}
-
-.new-kind {
-  width: 100%;
-}
-
+.new-name,
+.new-kind,
 .block {
   width: 100%;
 }
@@ -427,6 +373,12 @@ function onClose(): void {
   border-bottom: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
+  transition: background 0.18s ease, box-shadow 0.18s ease, padding-left 0.18s ease;
+}
+
+.item:hover:not(.active) {
+  background: var(--panel-2);
+  padding-left: 14px;
 }
 
 .item.active {
@@ -450,6 +402,9 @@ function onClose(): void {
   min-width: 0;
   overflow-y: auto;
   padding: 12px 14px;
+}
+
+.edit-inner {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -518,6 +473,12 @@ function onClose(): void {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel-2);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.sample:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-sm);
 }
 
 .sample-top {
@@ -584,7 +545,7 @@ function onClose(): void {
 }
 
 .edit-foot {
-  margin-top: auto;
+  margin-top: 8px;
   padding-top: 10px;
   display: flex;
   justify-content: flex-end;
@@ -610,23 +571,6 @@ function onClose(): void {
 
 .hidden-file {
   display: none;
-}
-
-.foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 14px;
-  border-top: 1px solid var(--line);
-}
-
-.tip {
-  font-size: 11px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .primary {
