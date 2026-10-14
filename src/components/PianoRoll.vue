@@ -1708,125 +1708,143 @@ watch(
 
 <template>
   <section class="piano-roll">
-    <!-- 卷帘小工具栏 -->
+    <!-- 卷帘小工具栏：按「轨道信息 / 编辑 / 显示 / 音阶 / 缩放」分组成簇，避免一整排控件糊成一片 -->
     <header class="pr-head">
-      <span class="chip" :style="{ background: trackColor }" />
-      <strong class="track-name">{{ track?.name ?? '未选择轨道' }}</strong>
-      <span class="dim">{{ track ? INSTRUMENT_LABELS[track.instrument] : '—' }}</span>
+      <!-- 轨道信息 -->
+      <div class="pr-group">
+        <span class="chip" :style="{ background: trackColor }" />
+        <strong class="track-name">{{ track?.name ?? '未选择轨道' }}</strong>
+        <span class="dim">{{ track ? INSTRUMENT_LABELS[track.instrument] : '—' }}</span>
+        <span class="dim">已选 {{ state.selectedNoteIds.length }} / 共 {{ noteCount }}</span>
+      </div>
 
-      <span class="gap" />
-
-      <label class="field">
-        网格
-        <select :value="state.snapDivision" @change="onGridChange">
-          <option :value="1">四分音符</option>
-          <option :value="0.5">八分音符</option>
-          <option :value="0.25">十六分音符</option>
-          <option :value="0.125">三十二分音符</option>
-        </select>
-      </label>
-      <button title="把选中音符（未选中则整段）对齐到网格" @click="onQuantize">量化</button>
-      <button
-        :class="{ active: state.velocityLaneOn }"
-        title="展开 / 收起底部力度编辑条"
-        @click="toggleVelocityLane"
-      >
-        力度条
-      </button>
-      <button
-        :class="{ active: state.noteColorByVelocity }"
-        title="按力度给音符着色（冷色弱、暖色强）"
-        @click="toggleNoteColor"
-      >
-        力度着色
-      </button>
-      <button
-        :class="{ active: state.automationLaneOn }"
-        title="展开 / 收起底部自动化包络编辑条"
-        @click="toggleAutomationLane"
-      >
-        包络
-      </button>
-      <label class="field">
-        音阶
-        <select :value="state.project.scale.type" @change="onScaleTypeChange">
-          <option v-for="def in SCALE_DEFS" :key="def.type" :value="def.type">{{ def.label }}</option>
-        </select>
-      </label>
-      <label class="field">
-        根音
-        <select :value="state.project.scale.root" @change="onScaleRootChange">
-          <option v-for="opt in SCALE_ROOT_OPTIONS" :key="opt.value" :value="opt.value">
-            {{ opt.label }}
-          </option>
-        </select>
-      </label>
-      <button
-        :class="{ active: state.scaleLockOn }"
-        title="开启后，新增与拖动音符都会吸附到所选音阶"
-        @click="toggleScaleLock"
-      >
-        锁定
-      </button>
-      <button
-        :disabled="state.selectedNoteIds.length === 0"
-        title="把选中音符的错音吸附到当前音阶"
-        @click="onQuantizeToScale"
-      >
-        吸附音阶
-      </button>
-      <button
-        :disabled="state.selectedNoteIds.length === 0"
-        title="删除选中的音符（也可按 Delete 键）"
-        @click="deleteSelectedNotes"
-      >
-        删除音符
-      </button>
-      <span class="dim">已选 {{ state.selectedNoteIds.length }} / 共 {{ noteCount }}</span>
-
-      <span class="gap" />
-
-      <button title="缩小" @click="zoomBy(1 / 1.3)">－</button>
-      <button title="放大" @click="zoomBy(1.3)">＋</button>
-
-      <!-- 操作提示：收进「?」图标，悬停或点击时弹出，避免长文本挤压网格 -->
-      <div
-        ref="hintWrapEl"
-        class="hint-wrap"
-        @mouseenter="hintHover = true"
-        @mouseleave="hintHover = false"
-      >
+      <!-- 编辑：网格、量化与音符增删 -->
+      <div class="pr-group">
+        <span class="group-label">编辑</span>
+        <label class="field">
+          网格
+          <select :value="state.snapDivision" @change="onGridChange">
+            <option :value="1">四分音符</option>
+            <option :value="0.5">八分音符</option>
+            <option :value="0.25">十六分音符</option>
+            <option :value="0.125">三十二分音符</option>
+          </select>
+        </label>
+        <button title="把选中音符（未选中则整段）对齐到网格" @click="onQuantize">量化</button>
         <button
-          ref="hintBtnEl"
-          class="hint-btn"
-          :class="{ open: hintOpen || hintHover }"
-          title="操作提示"
-          @click="toggleHint"
+          :disabled="state.selectedNoteIds.length === 0"
+          title="删除选中的音符（也可按 Delete 键）"
+          @click="deleteSelectedNotes"
         >
-          ?
+          删除音符
         </button>
-        <div
-          v-if="hintOpen || hintHover"
-          ref="hintPopEl"
-          class="hint-pop"
-          :style="{ left: hintPos.x + 'px', top: hintPos.y + 'px' }"
+      </div>
+
+      <!-- 显示：底部编辑条与着色开关 -->
+      <div class="pr-group">
+        <span class="group-label">显示</span>
+        <button
+          :class="{ active: state.velocityLaneOn }"
+          title="展开 / 收起底部力度编辑条"
+          @click="toggleVelocityLane"
         >
-          <div class="hint-pop-title">操作提示</div>
-          <template v-if="state.deviceMode === 'pad'">
-            <div class="hint-line">拖动空白处框选</div>
-            <div class="hint-line">拖动音符移动 / 改时长</div>
-            <div class="hint-line">点按空白处新增音符</div>
-            <div class="hint-line">长按音符弹出菜单</div>
-            <div class="hint-line">长按后继续拖动 = 移动音符</div>
-            <div class="hint-line">横向滚动用底部导航条</div>
-          </template>
-          <template v-else>
-            <div class="hint-line">滚轮移动音高</div>
-            <div class="hint-line">Shift + 滚轮左右滚动</div>
-            <div class="hint-line">Ctrl + 滚轮缩放</div>
-            <div class="hint-line">Shift + 拖拽框选</div>
-            <div class="hint-line">右键菜单</div>
-          </template>
+          力度条
+        </button>
+        <button
+          :class="{ active: state.automationLaneOn }"
+          title="展开 / 收起底部自动化包络编辑条"
+          @click="toggleAutomationLane"
+        >
+          包络
+        </button>
+        <button
+          :class="{ active: state.noteColorByVelocity }"
+          title="按力度给音符着色（冷色弱、暖色强）"
+          @click="toggleNoteColor"
+        >
+          力度着色
+        </button>
+      </div>
+
+      <!-- 音阶：锁定与量化到音阶 -->
+      <div class="pr-group">
+        <span class="group-label">音阶</span>
+        <label class="field">
+          音阶
+          <select :value="state.project.scale.type" @change="onScaleTypeChange">
+            <option v-for="def in SCALE_DEFS" :key="def.type" :value="def.type">{{ def.label }}</option>
+          </select>
+        </label>
+        <label class="field">
+          根音
+          <select :value="state.project.scale.root" @change="onScaleRootChange">
+            <option v-for="opt in SCALE_ROOT_OPTIONS" :key="opt.value" :value="opt.value">
+              {{ opt.label }}
+            </option>
+          </select>
+        </label>
+        <button
+          :class="{ active: state.scaleLockOn }"
+          title="开启后，新增与拖动音符都会吸附到所选音阶"
+          @click="toggleScaleLock"
+        >
+          锁定
+        </button>
+        <button
+          :disabled="state.selectedNoteIds.length === 0"
+          title="把选中音符的错音吸附到当前音阶"
+          @click="onQuantizeToScale"
+        >
+          吸附音阶
+        </button>
+      </div>
+
+      <span class="gap" />
+
+      <!-- 缩放与操作提示 -->
+      <div class="pr-group">
+        <button title="缩小" @click="zoomBy(1 / 1.3)">－</button>
+        <button title="放大" @click="zoomBy(1.3)">＋</button>
+
+        <!-- 操作提示：收进「?」图标，悬停或点击时弹出，避免长文本挤压网格 -->
+        <div
+          ref="hintWrapEl"
+          class="hint-wrap"
+          @mouseenter="hintHover = true"
+          @mouseleave="hintHover = false"
+        >
+          <button
+            ref="hintBtnEl"
+            class="hint-btn"
+            :class="{ open: hintOpen || hintHover }"
+            title="操作提示"
+            @click="toggleHint"
+          >
+            ?
+          </button>
+          <div
+            v-if="hintOpen || hintHover"
+            ref="hintPopEl"
+            class="hint-pop"
+            :style="{ left: hintPos.x + 'px', top: hintPos.y + 'px' }"
+          >
+            <div class="hint-pop-title">操作提示</div>
+            <template v-if="state.deviceMode === 'pad'">
+              <div class="hint-line">拖动空白处框选</div>
+              <div class="hint-line">拖动音符移动 / 改时长</div>
+              <div class="hint-line">点按空白处新增音符</div>
+              <div class="hint-line">长按音符弹出菜单</div>
+              <div class="hint-line">长按后继续拖动 = 移动音符</div>
+              <div class="hint-line">横向滚动用底部导航条</div>
+            </template>
+            <template v-else>
+              <div class="hint-line">滚轮移动音高</div>
+              <div class="hint-line">Shift + 滚轮左右滚动</div>
+              <div class="hint-line">Ctrl + 滚轮缩放</div>
+              <div class="hint-line">Shift + 拖拽框选</div>
+              <div class="hint-line">右键菜单</div>
+            </template>
+          </div>
         </div>
       </div>
     </header>
@@ -2000,6 +2018,30 @@ watch(
   border-bottom: 1px solid var(--line);
   flex-wrap: wrap;
   row-gap: 5px;
+}
+
+/*
+ * 工具栏分组：同类控件收进一个 .pr-group。
+ * 分组在父容器里是「一个整体」，父容器换行时不会被拆散，
+ * 因此窄屏下不会出现「力度条留在上一行、包络掉到下一行」的错位。
+ * 内部仍允许换行：万一某个分组自身宽过一整行，宁可组内折行也不要横向溢出。
+ */
+.pr-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.pr-group + .pr-group {
+  margin-left: 6px;
+}
+
+/* 分组前缀标签（编辑 / 显示 / 音阶），用弱化色，只做归类提示不抢视线 */
+.group-label {
+  color: var(--text-dim);
+  font-size: 11px;
+  letter-spacing: 0.06em;
 }
 
 .chip {
