@@ -785,6 +785,141 @@ function onNavPointerUp(): void {
   window.removeEventListener('pointercancel', onNavPointerUp)
 }
 
+// ---------------------------------------------------------------- 自绘滚动条
+
+/**
+ * 网格视口尺寸（随面板缩放 / 布局调整同步）。
+ * 滑块的占比和行程都依赖它，因此需要一份响应式副本：
+ * 直接从 DOM 现读无法驱动模板重新渲染。
+ */
+const viewportW = ref(0)
+const viewportH = ref(0)
+const vbarEl = ref<HTMLElement | null>(null)
+const hbarEl = ref<HTMLElement | null>(null)
+
+/** 滑块最小长度，避免缩放到最小时滑块细到抓不住 */
+const THUMB_MIN = 24
+
+function syncViewportSize(): void {
+  const body = bodyEl.value
+  if (!body) return
+  viewportW.value = body.clientWidth
+  viewportH.value = body.clientHeight
+}
+
+/** 与 visibleRowCount 同一套换算，但作用于给定高度（视口尺寸同步前也能算） */
+function visibleRowsAt(height: number): number {
+  return Math.min(MAX_MIDI - MIN_MIDI + 1, Math.ceil(height / rowHeight.value) + 1)
+}
+
+/** 竖向滑块：高度 = 可视行数占总行数的比例，位置由 topMidi 反算 */
+const vThumb = computed(() => {
+  const track = viewportH.value
+  const rows = MAX_MIDI - MIN_MIDI + 1
+  if (track <= 0) return { height: 0, top: 0 }
+  const visible = visibleRowsAt(track)
+  const height = Math.max(THUMB_MIN, (visible / rows) * track)
+  const minTop = MIN_MIDI + visible - 1
+  const span = Math.max(1, MAX_MIDI - minTop)
+  return { height, top: ((MAX_MIDI - topMidi.value) / span) * (track - height) }
+})
+
+/** 横向滑块：宽度 = 视口占内容宽度的比例，位置由 scrollLeft 反算 */
+const hThumb = computed(() => {
+  const track = viewportW.value
+  const content = Math.max(track, totalWidth.value)
+  if (track <= 0 || content <= track) return { width: 0, left: 0 }
+  const width = Math.max(THUMB_MIN, (track / content) * track)
+  const maxScroll = content - track
+  return { width, left: clamp(state.view.scrollLeft / maxScroll, 0, 1) * (track - width) }
+})
+
+// ---- 竖向滚动条
+
+const vDrag = { active: false, offset: 0 }
+
+function onVScrollPointerDown(event: PointerEvent): void {
+  const host = vbarEl.value
+  const { top, height } = vThumb.value
+  if (!host || event.button !== 0 || height <= 0 || height >= viewportH.value) return
+  const y = event.clientY - host.getBoundingClientRect().top
+  const onThumb = y >= top && y <= top + height
+  // 点在轨道上 → 让点击处成为滑块中心；点在滑块上 → 保留抓取偏移
+  vDrag.offset = onThumb ? y - top : height / 2
+  if (!onThumb) applyVScroll(y - vDrag.offset)
+  vDrag.active = true
+  window.addEventListener('pointermove', onVScrollPointerMove)
+  window.addEventListener('pointerup', onVScrollPointerUp)
+  window.addEventListener('pointercancel', onVScrollPointerUp)
+}
+
+function onVScrollPointerMove(event: PointerEvent): void {
+  const host = vbarEl.value
+  if (!vDrag.active || !host) return
+  applyVScroll(event.clientY - host.getBoundingClientRect().top - vDrag.offset)
+}
+
+function onVScrollPointerUp(): void {
+  if (!vDrag.active) return
+  vDrag.active = false
+  window.removeEventListener('pointermove', onVScrollPointerMove)
+  window.removeEventListener('pointerup', onVScrollPointerUp)
+  window.removeEventListener('pointercancel', onVScrollPointerUp)
+}
+
+/** 拖动竖向滑块：滑块顶部位置 → 新的音高窗口（夹取范围与滚轮保持一致） */
+function applyVScroll(thumbTop: number): void {
+  const track = viewportH.value
+  const travel = track - vThumb.value.height
+  if (travel <= 0) return
+  const visible = visibleRowsAt(track)
+  const minTop = MIN_MIDI + visible - 1
+  const span = Math.max(1, MAX_MIDI - minTop)
+  topMidi.value = clamp(Math.round(MAX_MIDI - clamp(thumbTop / travel, 0, 1) * span), minTop, MAX_MIDI)
+  requestDraw()
+}
+
+// ---- 横向滚动条
+
+const hDrag = { active: false, offset: 0 }
+
+function onHScrollPointerDown(event: PointerEvent): void {
+  const host = hbarEl.value
+  const { left, width } = hThumb.value
+  if (!host || event.button !== 0 || width <= 0 || width >= viewportW.value) return
+  const x = event.clientX - host.getBoundingClientRect().left
+  const onThumb = x >= left && x <= left + width
+  hDrag.offset = onThumb ? x - left : width / 2
+  if (!onThumb) applyHScroll(x - hDrag.offset)
+  hDrag.active = true
+  window.addEventListener('pointermove', onHScrollPointerMove)
+  window.addEventListener('pointerup', onHScrollPointerUp)
+  window.addEventListener('pointercancel', onHScrollPointerUp)
+}
+
+function onHScrollPointerMove(event: PointerEvent): void {
+  const host = hbarEl.value
+  if (!hDrag.active || !host) return
+  applyHScroll(event.clientX - host.getBoundingClientRect().left - hDrag.offset)
+}
+
+function onHScrollPointerUp(): void {
+  if (!hDrag.active) return
+  hDrag.active = false
+  window.removeEventListener('pointermove', onHScrollPointerMove)
+  window.removeEventListener('pointerup', onHScrollPointerUp)
+  window.removeEventListener('pointercancel', onHScrollPointerUp)
+}
+
+/** 拖动横向滑块：滑块左端位置 → 网格滚动位置（onScroll 会把它同步进 state） */
+function applyHScroll(thumbLeft: number): void {
+  const body = bodyEl.value
+  const travel = viewportW.value - hThumb.value.width
+  if (!body || travel <= 0) return
+  const maxScroll = Math.max(0, body.scrollWidth - body.clientWidth)
+  body.scrollLeft = clamp(thumbLeft / travel, 0, 1) * maxScroll
+}
+
 /** 底部编辑条坐标 → 画布本地坐标（默认取力度条画布，自动化条显式传入自己的画布） */
 function laneLocal(event: PointerEvent | MouseEvent, target?: HTMLCanvasElement | null): { x: number; y: number } {
   const canvas = target ?? velocityEl.value
@@ -1739,9 +1874,13 @@ let resizeObserver: ResizeObserver | null = null
 
 onMounted(() => {
   rafId = requestAnimationFrame(loop)
+  syncViewportSize()
   const host = bodyEl.value?.parentElement
   if (host) {
-    resizeObserver = new ResizeObserver(() => requestDraw())
+    resizeObserver = new ResizeObserver(() => {
+      syncViewportSize()
+      requestDraw()
+    })
     resizeObserver.observe(host)
   }
   // 点击菜单外部关闭菜单
@@ -1980,25 +2119,46 @@ watch(
     </header>
 
     <div class="pr-main">
-      <!-- 上：琴键列 + 音符网格 -->
+      <!-- 上：琴键列 + 音符网格 + 自绘滚动条 -->
       <div class="pr-top">
         <div class="pr-keys" :style="{ width: KEY_WIDTH + 'px', paddingBottom: SCROLLBAR_SIZE + 'px' }">
           <canvas ref="keysEl" class="keys-canvas" @pointerdown="onKeysPointerDown" />
         </div>
 
+        <!-- 网格与横向滚动条竖向堆叠：滚动条占位与原生的 10px 一致，网格视口高度不变 -->
+        <div class="pr-body-wrap">
+          <div
+            ref="bodyEl"
+            class="pr-body"
+            @scroll="onScroll"
+            @wheel.prevent="onWheel"
+            @pointerdown="onPointerDown"
+            @contextmenu.prevent="onContextMenu"
+          >
+            <canvas
+              ref="gridEl"
+              class="grid-canvas"
+              :style="{ width: totalWidth + 'px', height: '100%' }"
+            />
+          </div>
+          <div
+            ref="hbarEl"
+            class="pr-hbar"
+            :style="{ height: SCROLLBAR_SIZE + 'px' }"
+            @pointerdown="onHScrollPointerDown"
+          >
+            <div class="bar-thumb" :style="{ width: hThumb.width + 'px', left: hThumb.left + 'px' }" />
+          </div>
+        </div>
+
+        <!-- 竖向滚动条：高度取网格视口高度，与音符网格上下对齐 -->
         <div
-          ref="bodyEl"
-          class="pr-body"
-          @scroll="onScroll"
-          @wheel.prevent="onWheel"
-          @pointerdown="onPointerDown"
-          @contextmenu.prevent="onContextMenu"
+          ref="vbarEl"
+          class="pr-vbar"
+          :style="{ width: SCROLLBAR_SIZE + 'px', height: viewportH + 'px' }"
+          @pointerdown="onVScrollPointerDown"
         >
-          <canvas
-            ref="gridEl"
-            class="grid-canvas"
-            :style="{ width: totalWidth + 'px', height: '100%' }"
-          />
+          <div class="bar-thumb" :style="{ height: vThumb.height + 'px', top: vThumb.top + 'px' }" />
         </div>
       </div>
 
@@ -2371,18 +2531,73 @@ watch(
   touch-action: none;
 }
 
+/* 网格 + 横向滚动条：竖向堆叠，滚动条占位与原生滚动条一致（10px） */
+.pr-body-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .pr-body {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow-x: auto;
   overflow-y: hidden;
   position: relative;
   /* 触屏关键：禁用浏览器原生手势接管。否则单指拖动会被当作滚动，
      浏览器随即发出 pointercancel，长按框选 / 拖拽音符都会被中途打断。
-     横向滚动改由底部缩略导航条承担。 */
+     横向滚动改由自绘的 .pr-hbar 与底部缩略导航条承担。 */
   touch-action: none;
   user-select: none;
   -webkit-touch-callout: none;
+  /* 隐藏原生滚动条但保留 scrollLeft 能力：滚动条外观交给 .pr-hbar 自绘 */
+  scrollbar-width: none;
+}
+
+.pr-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* ---- 自绘滚动条（横向 / 竖向） ---- */
+.pr-hbar,
+.pr-vbar {
+  position: relative;
+  flex: 0 0 auto;
+  touch-action: none;
+}
+
+.pr-hbar {
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+.pr-vbar {
+  align-self: flex-start;
+  box-shadow: inset 1px 0 0 var(--line);
+}
+
+/* 滑块：尺寸与位置由脚本按视口比例算出，外观对齐全局原生滚动条样式 */
+.bar-thumb {
+  position: absolute;
+  border-radius: 5px;
+  background: #3a4050;
+  transition: background 0.16s ease;
+}
+
+.pr-hbar .bar-thumb {
+  top: 2px;
+  bottom: 2px;
+}
+
+.pr-vbar .bar-thumb {
+  left: 2px;
+  right: 2px;
+}
+
+.bar-thumb:hover {
+  background: #4d5470;
 }
 
 .grid-canvas {
