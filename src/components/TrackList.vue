@@ -1,14 +1,17 @@
 <script setup lang="ts">
 /**
- * 左侧轨道面板：新增轨道 + 轨道列表
+ * 左侧轨道面板
+ * - 新增 MIDI 乐器轨 / 新增音频轨 / 导入音频文件
+ * - 轨道列表（MIDI 与音频轨混排，由 TrackRow 自行区分展示）
  */
 import { computed, ref } from 'vue'
 import type { InstrumentType } from '@/types'
 import { INSTRUMENT_OPTIONS } from '@/types'
-import { addTrack, state, toggleVolumeDisplay } from '@/core/store'
+import { addAudioTrack, addTrack, importAudioFile, state, toggleVolumeDisplay } from '@/core/store'
 import TrackRow from './TrackRow.vue'
 
 const newInstrument = ref<InstrumentType>('piano')
+const audioInput = ref<HTMLInputElement | null>(null)
 
 const noteCount = computed(() =>
   state.project.tracks.reduce(
@@ -16,6 +19,17 @@ const noteCount = computed(() =>
     0
   )
 )
+const clipCount = computed(() =>
+  state.project.tracks.reduce((sum, track) => sum + track.clips.length, 0)
+)
+
+async function onAudioChange(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (file) await importAudioFile(file)
+  // 清空以便重复导入同一个文件
+  input.value = ''
+}
 </script>
 
 <template>
@@ -43,6 +57,14 @@ const noteCount = computed(() =>
       <button title="新增 MIDI 乐器轨道" @click="addTrack(newInstrument)">＋</button>
     </div>
 
+    <div class="head sub">
+      <button class="wide" title="新增一条空音频轨，可录音或导入音频填充" @click="addAudioTrack()">
+        ＋ 音频轨
+      </button>
+      <button class="wide" title="把本地音频文件导入为波形片段" @click="audioInput?.click()">导入音频</button>
+      <input ref="audioInput" type="file" accept="audio/*" class="hidden-file" @change="onAudioChange" />
+    </div>
+
     <div class="list">
       <TrackRow
         v-for="(track, index) in state.project.tracks"
@@ -55,20 +77,19 @@ const noteCount = computed(() =>
 
     <div class="foot">
       <span>{{ state.project.tracks.length }} 条轨道</span>
-      <span>{{ noteCount }} 个音符</span>
+      <span>{{ noteCount }} 音符 · {{ clipCount }} 片段</span>
     </div>
   </aside>
 </template>
 
 <style scoped>
 .track-panel {
-  width: 288px;
-  flex: 0 0 288px;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--panel);
-  border-right: 1px solid var(--line);
-  min-height: 0;
 }
 
 .head {
@@ -77,6 +98,16 @@ const noteCount = computed(() =>
   gap: 6px;
   padding: 8px;
   border-bottom: 1px solid var(--line);
+}
+
+.head.sub {
+  padding: 6px 8px;
+}
+
+.wide {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
 }
 
 .title {
@@ -99,6 +130,10 @@ const noteCount = computed(() =>
 
 .inst {
   max-width: 84px;
+}
+
+.hidden-file {
+  display: none;
 }
 
 .list {

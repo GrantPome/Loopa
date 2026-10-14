@@ -82,9 +82,9 @@ function onLimiterInput(event: Event): void {
 
 <style scoped>
 .master-panel {
-  width: 232px;
-  flex: 0 0 232px;
-  border-left: 1px solid var(--line);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
   padding: 6px 10px;
   display: flex;
   flex-direction: column;

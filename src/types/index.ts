@@ -4,8 +4,12 @@
  * 播放时再交给 Tone.Transport 换算成实际秒数。
  */
 
-/** 拍号：MVP 只支持 4/4 与 3/4 */
-export type TimeSignature = '4/4' | '3/4'
+/**
+ * 拍号：覆盖常用单拍子与复拍子。
+ * 注意：内部「拍（beat）」始终以四分音符为单位，
+ * 因此 6/8 = 3 拍、7/8 = 3.5 拍、12/8 = 6 拍（详见 beatsPerBarOf）。
+ */
+export type TimeSignature = '2/4' | '3/4' | '4/4' | '5/4' | '6/8' | '7/8' | '9/8' | '12/8'
 
 /** 旋律类音色（统一用 PolySynth 包装，可弹和弦） */
 export type MelodicInstrumentType =
@@ -61,6 +65,163 @@ export interface Region {
   notes: Note[]
 }
 
+/**
+ * 轨道类型：
+ * - midi：由内置合成器演奏，编辑对象是音符（钢琴卷帘）
+ * - audio：由录音 / 导入的波形构成，编辑对象是音频片段（波形编辑器）
+ */
+export type TrackKind = 'midi' | 'audio'
+
+/**
+ * 音频片段（波形）。
+ * PCM 采样数据体积大，存放于 IndexedDB（key 为索引键）；
+ * 工程 JSON 只保存可序列化的元信息与降采样后的波形峰值。
+ */
+export interface AudioClip {
+  id: string
+  name: string
+  /** 相对工程起点的起始位置（拍） */
+  start: number
+  /** 片段在时间轴上的时长（拍） */
+  duration: number
+  /** 相对源音频起点的偏移（秒），用于左边缘修剪 */
+  offset: number
+  /** 源音频总时长（秒），用于限制修剪范围 */
+  sourceDuration: number
+  /** 源采样率 */
+  sampleRate: number
+  /** IndexedDB 中的索引键 */
+  key: string
+  /** 片段增益 0~2（1 为原始音量） */
+  gain: number
+  /** 淡入时长（拍） */
+  fadeIn: number
+  /** 淡出时长（拍） */
+  fadeOut: number
+  /** 波形峰值缓存：按时间均匀采样，元素为归一化的 [min,max] 交替值（-1~1） */
+  peaks: number[]
+}
+
+// ---------------------------------------------------------------- 效果器
+
+/** 内置效果器类型 */
+export type EffectType = 'compressor' | 'delay' | 'chorus' | 'distortion' | 'filter' | 'phaser'
+
+/** 一个挂在轨道上的效果器实例 */
+export interface TrackEffect {
+  id: string
+  type: EffectType
+  enabled: boolean
+  /** 参数键 → 数值（键名与 EffectDef.params 对应） */
+  params: Record<string, number>
+}
+
+/** 单个可调参数的描述（供 UI 自动生成滑块） */
+export interface EffectParamDef {
+  key: string
+  label: string
+  min: number
+  max: number
+  step: number
+  default: number
+  /** 数值单位（用于显示，如 dB / ms / Hz） */
+  unit?: string
+}
+
+/** 效果器定义：名称、说明与全部参数 */
+export interface EffectDef {
+  type: EffectType
+  label: string
+  desc: string
+  params: EffectParamDef[]
+}
+
+/** 内置效果器清单（顺序即 UI 下拉框顺序） */
+export const EFFECT_DEFS: EffectDef[] = [
+  {
+    type: 'compressor',
+    label: '压缩器',
+    desc: '压制动态范围，让音量更稳定、更有冲击力',
+    params: [
+      { key: 'threshold', label: '阈值', min: -60, max: 0, step: 1, default: -24, unit: 'dB' },
+      { key: 'ratio', label: '压缩比', min: 1, max: 20, step: 0.5, default: 4, unit: ':1' },
+      { key: 'attack', label: '启动', min: 0.001, max: 0.5, step: 0.001, default: 0.01, unit: 's' },
+      { key: 'release', label: '释放', min: 0.01, max: 1, step: 0.01, default: 0.25, unit: 's' },
+      { key: 'makeup', label: '补偿增益', min: 0, max: 12, step: 0.5, default: 0, unit: 'dB' }
+    ]
+  },
+  {
+    type: 'delay',
+    label: '延迟',
+    desc: '回声效果，可制造空间感与节奏型重复',
+    params: [
+      { key: 'delayTime', label: '延迟时间', min: 0.01, max: 1, step: 0.01, default: 0.25, unit: 's' },
+      { key: 'feedback', label: '反馈', min: 0, max: 0.95, step: 0.01, default: 0.35 },
+      { key: 'wet', label: '湿度', min: 0, max: 1, step: 0.01, default: 0.3 }
+    ]
+  },
+  {
+    type: 'chorus',
+    label: '合唱',
+    desc: '轻微音高抖动，让声音更宽、更厚',
+    params: [
+      { key: 'frequency', label: '频率', min: 0.1, max: 8, step: 0.1, default: 1.5, unit: 'Hz' },
+      { key: 'depth', label: '深度', min: 0, max: 1, step: 0.01, default: 0.5 },
+      { key: 'delayTime', label: '延迟', min: 1, max: 20, step: 0.5, default: 3.5, unit: 'ms' },
+      { key: 'wet', label: '湿度', min: 0, max: 1, step: 0.01, default: 0.5 }
+    ]
+  },
+  {
+    type: 'distortion',
+    label: '失真',
+    desc: '削波过载，用于增加谐波与攻击性',
+    params: [
+      { key: 'distortion', label: '失真量', min: 0, max: 1, step: 0.01, default: 0.3 },
+      { key: 'wet', label: '湿度', min: 0, max: 1, step: 0.01, default: 1 }
+    ]
+  },
+  {
+    type: 'filter',
+    label: '滤波',
+    desc: '低通 / 高通滤波，塑造音色明暗',
+    params: [
+      { key: 'frequency', label: '截止频率', min: 40, max: 18000, step: 10, default: 1200, unit: 'Hz' },
+      { key: 'Q', label: '共振', min: 0.1, max: 20, step: 0.1, default: 1 },
+      { key: 'mode', label: '类型', min: 0, max: 1, step: 1, default: 0 }
+    ]
+  },
+  {
+    type: 'phaser',
+    label: '移相',
+    desc: '相位扫频，制造流动的金属感',
+    params: [
+      { key: 'frequency', label: '频率', min: 0.1, max: 8, step: 0.1, default: 0.5, unit: 'Hz' },
+      { key: 'octaves', label: '范围', min: 1, max: 6, step: 0.5, default: 3, unit: 'oct' },
+      { key: 'baseFrequency', label: '基频', min: 50, max: 2000, step: 10, default: 350, unit: 'Hz' },
+      { key: 'wet', label: '湿度', min: 0, max: 1, step: 0.01, default: 0.5 }
+    ]
+  }
+]
+
+/** 效果器类型 → 定义（快速查找） */
+export const EFFECT_DEF_MAP: Record<EffectType, EffectDef> = EFFECT_DEFS.reduce(
+  (map, def) => {
+    map[def.type] = def
+    return map
+  },
+  {} as Record<EffectType, EffectDef>
+)
+
+/** 按定义生成一组默认参数 */
+export function defaultEffectParams(type: EffectType): Record<string, number> {
+  const def = EFFECT_DEF_MAP[type]
+  const params: Record<string, number> = {}
+  def.params.forEach((p) => {
+    params[p.key] = p.default
+  })
+  return params
+}
+
 /** 均衡器频段标识（与 Track 上的字段名一一对应） */
 export type EqBand = 'eqLow' | 'eqMid' | 'eqHigh'
 
@@ -80,10 +241,37 @@ export type VolumeDisplay = 'db' | 'linear'
  */
 export type DeviceMode = 'pc' | 'pad'
 
-/** 一条乐器轨道 */
+/**
+ * 布局区域：左侧栏 / 中央主区 / 底部栏
+ * 每个区域是一个弹性容器，内部按顺序排列若干功能板块。
+ */
+export type RegionId = 'left' | 'center' | 'bottom'
+
+/** 可自由编排位置的功能板块 */
+export type PanelId = 'tracks' | 'fx' | 'editor' | 'keyboard' | 'master'
+
+/**
+ * 可持久化的布局配置：
+ * - left/center/bottom：各区域内的板块顺序
+ * - leftWidth/bottomHeight：区域尺寸（拖拽区域分隔条调整）
+ * - panelWeight：板块在所属区域主轴上的尺寸权重（拖拽板块间分隔条调整）
+ */
+export interface LayoutConfig {
+  left: PanelId[]
+  center: PanelId[]
+  bottom: PanelId[]
+  leftWidth: number
+  bottomHeight: number
+  panelWeight: Record<PanelId, number>
+}
+
+/** 一条轨道（MIDI 乐器轨或音频轨） */
 export interface Track {
   id: string
   name: string
+  /** 轨道类型：midi（音符）/ audio（波形）。旧数据缺省视为 midi */
+  kind: TrackKind
+  /** 音色：仅 midi 轨使用；audio 轨保留该字段以兼容统一结构 */
   instrument: InstrumentType
   /** 音量推子 0~1 */
   volume: number
@@ -97,11 +285,16 @@ export interface Track {
   eqHigh: number
   /** 混响发送量 0~1：本轨送入共享混响总线的比例 */
   reverbSend: number
+  /** 插入式效果器链（按顺序串联在乐器/音频源之后、均衡之前） */
+  effects: TrackEffect[]
   mute: boolean
   solo: boolean
   /** UI 上的轨道颜色标识 */
   color: string
+  /** MIDI 轨的片段（含音符） */
   regions: Region[]
+  /** 音频轨的波形片段 */
+  clips: AudioClip[]
 }
 
 /** 工程（可序列化为 JSON 存 localStorage / 导出文件） */
@@ -135,8 +328,13 @@ export interface ProjectMeta {
   updatedAt: number
 }
 
-/** 混音视图里的编辑视图模式 */
-export type ViewMode = 'piano' | 'mixer'
+/**
+ * 中央编辑区的视图模式：
+ * - piano：钢琴卷帘（MIDI 轨音符编辑）
+ * - audio：波形编辑器（音频轨片段修剪）
+ * - mixer：混音台
+ */
+export type ViewMode = 'piano' | 'audio' | 'mixer'
 
 /** 均衡器增益范围（dB） */
 export const EQ_MIN = -18
@@ -198,4 +396,16 @@ export const TRACK_COLORS = [
   '#8fa8ff',
   '#9be36b',
   '#ff9f7a'
+]
+
+/** 拍号下拉框选项（含复合拍子） */
+export const TIME_SIGNATURE_OPTIONS: { value: TimeSignature; label: string }[] = [
+  { value: '2/4', label: '2/4' },
+  { value: '3/4', label: '3/4' },
+  { value: '4/4', label: '4/4' },
+  { value: '5/4', label: '5/4' },
+  { value: '6/8', label: '6/8' },
+  { value: '7/8', label: '7/8' },
+  { value: '9/8', label: '9/8' },
+  { value: '12/8', label: '12/8' }
 ]

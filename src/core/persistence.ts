@@ -29,18 +29,22 @@ export function readProjects(): Project[] {
 /** 只取元信息，列表页无需加载全部音符 */
 export function readMetas(): ProjectMeta[] {
   return readProjects()
-    .map((p) => ({
-      id: p.id,
-      name: p.name,
-      bpm: p.bpm,
-      timeSignature: p.timeSignature,
-      trackCount: p.tracks.length,
-      noteCount: p.tracks.reduce(
-        (sum, t) => sum + t.regions.reduce((s, r) => s + r.notes.length, 0),
-        0
-      ),
-      updatedAt: p.updatedAt
-    }))
+    .map((p) => {
+      // 历史工程可能是旧结构，tracks / regions / notes 可能缺失，逐层兜底
+      const tracks = p.tracks ?? []
+      return {
+        id: p.id,
+        name: p.name,
+        bpm: p.bpm,
+        timeSignature: p.timeSignature,
+        trackCount: tracks.length,
+        noteCount: tracks.reduce(
+          (sum, t) => sum + (t.regions ?? []).reduce((s, r) => s + (r.notes ?? []).length, 0),
+          0
+        ),
+        updatedAt: p.updatedAt
+      }
+    })
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 

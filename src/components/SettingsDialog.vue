@@ -18,6 +18,7 @@ import {
   toggleVelocityLane,
   toggleVolumeDisplay
 } from '@/core/store'
+import { resetLayout, setEditMode } from '@/core/layout'
 
 const emit = defineEmits<{ (e: 'close'): void }>()
 
@@ -43,6 +44,19 @@ function onLongPressInput(event: Event): void {
 function onClose(): void {
   closeSettings()
   emit('close')
+}
+
+/** 进入布局编辑模式：关闭设置对话框，回到主界面拖拽板块 */
+function onEnterEditMode(): void {
+  closeSettings()
+  setEditMode(true)
+  emit('close')
+}
+
+/** 恢复默认布局（可重复使用，不会自动进入编辑模式） */
+function onResetLayout(): void {
+  resetLayout()
+  state.statusText = '已恢复默认布局'
 }
 </script>
 
@@ -130,6 +144,20 @@ function onClose(): void {
               {{ state.noteColorByVelocity ? '开' : '关' }}
             </button>
           </label>
+        </section>
+
+        <section class="group">
+          <h3>界面布局</h3>
+          <p class="desc">
+            进入编辑模式后，拖动板块顶部的标题栏即可调整顺序；把板块拖到其他区域，可与该区域的板块互换位置；拖动板块之间的分隔条，可调整相邻板块的宽高。
+          </p>
+          <div class="row layout-row">
+            <button class="primary" @click="onEnterEditMode">进入编辑模式</button>
+            <button @click="onResetLayout">恢复默认布局</button>
+          </div>
+          <p class="hint">
+            左栏宽度与底部栏高度，可直接拖拽区域之间的分隔条调整；布局会自动保存。
+          </p>
         </section>
       </div>
 
@@ -227,6 +255,15 @@ function onClose(): void {
 
 .device-select {
   padding: 5px 8px;
+}
+
+/* 布局操作按钮行 */
+.layout-row {
+  gap: 8px;
+}
+
+.layout-row .primary {
+  padding: 5px 14px;
 }
 
 .row {

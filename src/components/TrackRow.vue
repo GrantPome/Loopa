@@ -22,6 +22,8 @@ import { formatVolume } from '@/utils/audio'
 const props = defineProps<{ track: Track; index: number }>()
 
 const selected = computed(() => state.selectedTrackId === props.track.id)
+/** 是否为音频轨：音频轨没有音色选择，改为展示片段数量 */
+const isAudio = computed(() => props.track.kind === 'audio')
 /** 音量读数：随全局显示单位在 dB 与线性百分比之间切换 */
 const volumeText = computed(() => formatVolume(props.track.volume, state.volumeDisplay))
 const volumeUnitTitle = computed(() =>
@@ -61,11 +63,16 @@ function onPanInput(event: Event): void {
     </div>
 
     <div class="line">
-      <select class="inst" :value="track.instrument" @change="onInstrumentChange">
+      <select v-if="!isAudio" class="inst" :value="track.instrument" @change="onInstrumentChange">
         <option v-for="option in INSTRUMENT_OPTIONS" :key="option.value" :value="option.value">
           {{ option.label }}
         </option>
       </select>
+      <template v-else>
+        <span class="badge">音频</span>
+        <span class="clips">{{ track.clips.length }} 个波形片段</span>
+      </template>
+      <span class="spacer" />
       <button class="mini toggle" :class="{ on: track.mute }" title="静音" @click.stop="toggleMute(track.id)">
         M
       </button>
@@ -167,6 +174,31 @@ function onPanInput(event: Event): void {
 .inst {
   flex: 1;
   min-width: 0;
+}
+
+.spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 音频轨标识 */
+.badge {
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  flex: 0 0 auto;
+}
+
+.clips {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toggle {

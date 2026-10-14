@@ -1,7 +1,14 @@
 import * as Tone from 'tone'
-import type { EqBand, Project, Track, TimeSignature } from '@/types'
-import { beatsPerBarOf, beatsToTicks, midiToNoteName } from '@/utils/music'
+import type { EqBand, Project, TimeSignature, Track, TrackEffect } from '@/types'
+import {
+  beatsPerBarOf,
+  beatsToTicks,
+  midiToNoteName,
+  timeSignatureParts
+} from '@/utils/music'
 import { createInstrument, isDrumTrack, type InstrumentNode } from './instruments'
+import { buildEffectChain, disposeEffectChain, type EffectChainItem } from './effects'
+import { getCachedPcm, type PcmData } from './audioStore'
 
 /**
  * 计算轨道的实际线性增益：
@@ -17,14 +24,24 @@ export function computeTrackGain(track: Track, tracks: Track[]): number {
 
 /**
  * 一条轨道对应的音频通道：
- * 乐器 → 均衡 → 声像 → 推子 → 主干声总线
- *                          ↘ 混响发送 → 共享混响总线
- *                          ↘ 电平表（旁路分析，不影响声音）
+ * 信号源 → 效果器链 → 均衡 → 声像 → 推子 → 主干声总线
+ *                                  ↘ 混响发送 → 共享混响总线
+ *                                  ↘ 电平表（旁路分析，不影响声音）
+ *
+ * 「信号源」对 MIDI 轨是内置合成器，对音频轨是波形片段播放器；
+ * 两者都先汇入统一的 entry 节点，因此后续链路完全一致。
  */
 interface Channel {
   id: string
-  instrument: Track['instrument']
-  node: InstrumentNode
+  kind: Track['kind']
+  instrumentType: Track['instrument']
+  /** MIDI 轨的合成器；音频轨为 null */
+  instrument: InstrumentNode | null
+  /** 统一信号入口 */
+  entry: Tone.Gain
+  effects: EffectChainItem[]
+  /** 效果器链结构签名，用于判断是否需要重建 */
+  effectSignature: string
   eq: Tone.EQ3
   panner: Tone.Panner
   gain: Tone.Gain
@@ -39,13 +56,18 @@ const EQ3_KEYS: Record<EqBand, 'low' | 'mid' | 'high'> = {
   eqHigh: 'high'
 }
 
+/** 效果器链结构签名：只有 id / 类型 / 启用状态变化才需要重建链路 */
+function effectSignature(effects: TrackEffect[]): string {
+  return effects.map((e) => `${e.id}:${e.type}:${e.enabled ? 1 : 0}`).join('|')
+}
+
 /**
  * 音频引擎（单例）
  *
  * 设计要点：
  * - 所有音乐调度都交给 Tone.Transport，绝不使用 setTimeout 计时
  * - 音频上下文必须由用户手势触发 Tone.start() 后才可用
- * - 音符排期使用 "小节:拍:十六分" 相对时间，BPM 改变时自动重新缩放
+ * - 音符排期使用 tick 这种音乐时间单位，BPM 改变时自动重新缩放
  * - 混音总线：所有轨道汇入干声总线 + 共享混响总线，最后经限幅器输出
  */
 class AudioEngine {
@@ -76,6 +98,10 @@ class AudioEngine {
   private noteEventIds: number[] = []
   /** 节拍器循环事件 id */
   private metronomeId: number | null = null
+  /** 音频片段播放器（每次重排整体重建） */
+  private clipPlayers: { player: Tone.Player; gain: Tone.Gain }[] = []
+  /** 采样键 → AudioBuffer 缓存，避免每次重排都重新拷贝整段采样 */
+  private bufferCache = new Map<string, AudioBuffer>()
 
   private metronomeOn = false
   private countInOn = false
@@ -140,14 +166,14 @@ class AudioEngine {
 
     const t = this.transport
     t.bpm.value = this.bpm
-    t.timeSignature = beatsPerBarOf(this.timeSignature)
+    t.timeSignature = timeSignatureParts(this.timeSignature)
 
     this.graphReady = true
   }
 
   // ------------------------------------------------------------ 轨道 / 混音
 
-  /** 让音频通道与工程轨道保持一致（新增 / 删除 / 换音色） */
+  /** 让音频通道与工程轨道保持一致（新增 / 删除 / 换音色 / 换轨道类型） */
   syncTracks(project: Project): void {
     if (!this.graphReady) return
 
@@ -161,8 +187,12 @@ class AudioEngine {
 
     for (const track of project.tracks) {
       let channel = this.channels.get(track.id)
-      // 换音色 = 重建乐器节点
-      if (channel && channel.instrument !== track.instrument) {
+      // 轨道类型变化、或 MIDI 轨换音色 → 整个通道重建
+      const needsRebuild =
+        channel !== undefined &&
+        (channel.kind !== track.kind ||
+          (track.kind === 'midi' && channel.instrumentType !== track.instrument))
+      if (needsRebuild && channel) {
         this.disposeChannel(channel)
         this.channels.delete(track.id)
         channel = undefined
@@ -170,6 +200,8 @@ class AudioEngine {
       if (!channel) {
         channel = this.createChannel(track)
         this.channels.set(track.id, channel)
+      } else if (effectSignature(track.effects) !== channel.effectSignature) {
+        this.rebuildEffects(channel, track)
       }
       this.applyMix(channel, track, project.tracks)
     }
@@ -193,10 +225,74 @@ class AudioEngine {
     const meter = new Tone.Meter({ normalRange: true, smoothing: 0.85 })
     gain.connect(meter)
 
-    const node = createInstrument(track.instrument)
-    node.connect(eq)
+    const entry = new Tone.Gain(1)
+    const effects = buildEffectChain(track.effects)
+    const channel: Channel = {
+      id: track.id,
+      kind: track.kind,
+      instrumentType: track.instrument,
+      instrument: null,
+      entry,
+      effects,
+      effectSignature: effectSignature(track.effects),
+      eq,
+      panner,
+      gain,
+      send,
+      meter
+    }
+    this.connectChain(channel)
 
-    return { id: track.id, instrument: track.instrument, node, eq, panner, gain, send, meter }
+    if (track.kind === 'midi') {
+      const instrument = createInstrument(track.instrument)
+      instrument.connect(entry)
+      channel.instrument = instrument
+    }
+
+    return channel
+  }
+
+  /** 把入口 → 效果器链 → 均衡串起来 */
+  private connectChain(channel: Channel): void {
+    let node: Tone.ToneAudioNode = channel.entry
+    for (const item of channel.effects) {
+      node.connect(item.node.input)
+      node = item.node.output
+    }
+    node.connect(channel.eq)
+  }
+
+  /** 效果器链结构变化时重建（参数变化不重建，走原地更新） */
+  private rebuildEffects(channel: Channel, track: Track): void {
+    channel.entry.disconnect()
+    disposeEffectChain(channel.effects)
+    channel.effects = buildEffectChain(track.effects)
+    channel.effectSignature = effectSignature(track.effects)
+    this.connectChain(channel)
+    // 新节点用数据里的当前参数初始化后再对齐一次，保证 UI 拖动过的值不丢
+    this.pushEffectParams(channel, track)
+  }
+
+  /** 把工程里的效果器参数推给已存在的节点 */
+  private pushEffectParams(channel: Channel, track: Track): void {
+    for (const item of channel.effects) {
+      const data = track.effects.find((e) => e.id === item.id)
+      if (!data) continue
+      for (const [key, value] of Object.entries(data.params)) {
+        item.node.setParam(key, value)
+      }
+    }
+  }
+
+  /** 供 store 调用：效果器增删改后同步到引擎 */
+  updateTrackEffects(track: Track): void {
+    const channel = this.channels.get(track.id)
+    if (!channel) return
+    if (effectSignature(track.effects) !== channel.effectSignature) {
+      this.rebuildEffects(channel, track)
+    } else {
+      this.pushEffectParams(channel, track)
+    }
   }
 
   /** 实时更新单条轨道的音量/声像/均衡/发送（不需要重排音符） */
@@ -239,7 +335,9 @@ class AudioEngine {
   }
 
   private disposeChannel(channel: Channel): void {
-    channel.node.dispose()
+    channel.instrument?.dispose()
+    disposeEffectChain(channel.effects)
+    channel.entry.dispose()
     channel.eq.dispose()
     channel.panner.dispose()
     channel.gain.dispose()
@@ -271,8 +369,8 @@ class AudioEngine {
   // ---------------------------------------------------------------- 排期
 
   /**
-   * 重新排期整个工程的音符。
-   * 使用 Transport 的相对时间表示，BPM 变化时无需重排。
+   * 重新排期整个工程的音符与音频片段。
+   * 使用 Transport 的音乐时间表示（tick），BPM 变化时无需重排。
    */
   scheduleProject(project: Project): void {
     if (!this.graphReady) return
@@ -280,22 +378,29 @@ class AudioEngine {
 
     for (const id of this.noteEventIds) t.clear(id)
     this.noteEventIds = []
+    this.disposeClipPlayers()
 
     const ppq = t.PPQ
 
     for (const track of project.tracks) {
       const channel = this.channels.get(track.id)
       if (!channel) continue
-      const drum = isDrumTrack(track.instrument)
 
+      if (track.kind === 'audio') {
+        this.scheduleClips(channel, track, ppq)
+        continue
+      }
+
+      const drum = isDrumTrack(track.instrument)
       for (const region of track.regions) {
         for (const note of region.notes) {
           const at = beatsToTicks(region.start + note.start, ppq)
           const eventId = t.schedule((time: number) => {
             // 时长在触发瞬间按当前 BPM 计算，跟随变速
             const seconds = note.duration * (60 / t.bpm.value)
-            if (drum) channel.node.triggerAttackRelease(note.midi, seconds, time, note.velocity)
-            else channel.node.triggerAttackRelease(midiToNoteName(note.midi), seconds, time, note.velocity)
+            if (!channel.instrument) return
+            if (drum) channel.instrument.triggerAttackRelease(note.midi, seconds, time, note.velocity)
+            else channel.instrument.triggerAttackRelease(midiToNoteName(note.midi), seconds, time, note.velocity)
             this.onNoteOn?.(note.midi, track.id)
           }, at)
           this.noteEventIds.push(eventId)
@@ -306,6 +411,59 @@ class AudioEngine {
     // 循环区间始终覆盖整个工程长度
     t.loopStart = 0
     t.loopEnd = beatsToTicks(project.bars * beatsPerBarOf(project.timeSignature), ppq)
+  }
+
+  /** 排期一条音频轨上的全部波形片段 */
+  private scheduleClips(channel: Channel, track: Track, ppq: number): void {
+    const t = this.transport
+    const secondsPerBeat = 60 / t.bpm.value
+
+    for (const clip of track.clips) {
+      const buffer = this.clipBuffer(clip.key)
+      if (!buffer) continue
+
+      const player = new Tone.Player({
+        url: buffer,
+        fadeIn: clip.fadeIn * secondsPerBeat,
+        fadeOut: clip.fadeOut * secondsPerBeat
+      })
+      const clipGain = new Tone.Gain(clip.gain)
+      player.connect(clipGain)
+      clipGain.connect(channel.entry)
+
+      // sync() 让播放器跟随 Transport 的播放/暂停/循环，避免中途暂停后仍在出声
+      player.sync().start(
+        beatsToTicks(clip.start, ppq),
+        clip.offset,
+        clip.duration * secondsPerBeat
+      )
+      this.clipPlayers.push({ player, gain: clipGain })
+    }
+  }
+
+  private disposeClipPlayers(): void {
+    for (const item of this.clipPlayers) {
+      item.player.unsync()
+      item.player.dispose()
+      item.gain.dispose()
+    }
+    this.clipPlayers = []
+  }
+
+  /** 把 IndexedDB 里的采样转成 AudioBuffer（带缓存） */
+  private clipBuffer(key: string): AudioBuffer | null {
+    const cached = this.bufferCache.get(key)
+    if (cached) return cached
+    const pcm = getCachedPcm(key)
+    if (!pcm) return null
+    const buffer = pcmToAudioBuffer(pcm)
+    this.bufferCache.set(key, buffer)
+    return buffer
+  }
+
+  /** 采样数据被删除后清掉对应缓存 */
+  dropBuffer(key: string): void {
+    this.bufferCache.delete(key)
   }
 
   // ------------------------------------------------------------ 播放控制
@@ -341,7 +499,7 @@ class AudioEngine {
   setTimeSignature(ts: TimeSignature): void {
     if (ts === this.timeSignature) return
     this.timeSignature = ts
-    this.transport.timeSignature = beatsPerBarOf(ts)
+    this.transport.timeSignature = timeSignatureParts(ts)
     this.rebuildMetronome()
   }
 
@@ -356,6 +514,11 @@ class AudioEngine {
     this.rebuildMetronome()
   }
 
+  /**
+   * 节拍器的点击单位取「拍号分母对应的音符」：
+   * 4/4 → 四分音符、6/8 → 八分音符，
+   * 这样复合拍子（如 7/8）的重音才会落在正确的位置上。
+   */
   private rebuildMetronome(): void {
     if (!this.graphReady) return
     const t = this.transport
@@ -365,13 +528,16 @@ class AudioEngine {
     }
     if (!this.metronomeOn) return
 
-    const bpb = beatsPerBarOf(this.timeSignature)
-    // 每四分音符一次点击，重音落在小节第一拍
+    const [numerator, denominator] = timeSignatureParts(this.timeSignature)
+    const interval = denominator === 8 ? '8n' : '4n'
+    const ticksPerClick = (t.PPQ * 4) / denominator
+    const clicksPerBar = Math.max(1, Math.round((numerator * 4) / denominator))
+
     this.metronomeId = t.scheduleRepeat((time: number) => {
       const ticks = t.getTicksAtTime(time)
-      const beatInBar = Math.round(ticks / t.PPQ) % bpb
-      this.playClick(time, beatInBar === 0)
-    }, '4n', 0)
+      const index = Math.round(ticks / ticksPerClick) % clicksPerBar
+      this.playClick(time, index === 0)
+    }, interval, 0)
   }
 
   /** 播放一次节拍器点击 */
@@ -379,6 +545,13 @@ class AudioEngine {
     if (!this.graphReady) return
     const synth = accent ? this.clickHi : this.clickLo
     synth.triggerAttackRelease(accent ? 'C6' : 'G5', 0.03, time, accent ? 0.95 : 0.6)
+  }
+
+  /** 预备拍：一小节的点击次数与间隔（与当前拍号一致） */
+  private countInPlan(): { count: number; interval: number } {
+    const [numerator, denominator] = timeSignatureParts(this.timeSignature)
+    const interval = (60 / this.bpm) * (4 / denominator)
+    return { count: Math.max(1, numerator), interval }
   }
 
   /**
@@ -393,13 +566,12 @@ class AudioEngine {
 
     const atStart = this.getBeats() < 0.001
     if (this.countInOn && atStart) {
-      const spb = 60 / this.bpm
-      const bpb = beatsPerBarOf(this.timeSignature)
+      const { count, interval } = this.countInPlan()
       const begin = Tone.now() + 0.12
-      for (let i = 0; i < bpb; i += 1) {
-        this.playClick(begin + i * spb, i === 0)
+      for (let i = 0; i < count; i += 1) {
+        this.playClick(begin + i * interval, i === 0)
       }
-      t.start(begin + bpb * spb)
+      t.start(begin + count * interval)
     } else {
       t.start()
     }
@@ -435,18 +607,35 @@ class AudioEngine {
   /** 立即触发（用于屏幕键盘，使用 currentTime 降低延迟） */
   previewAttack(trackId: string, midi: number, velocity = 0.85): void {
     const channel = this.channels.get(trackId)
-    if (!channel) return
+    if (!channel || !channel.instrument) return
     const now = Tone.getContext().currentTime
-    if (isDrumTrack(channel.instrument)) channel.node.triggerAttack(midi, now, velocity)
-    else channel.node.triggerAttack(midiToNoteName(midi), now, velocity)
+    if (isDrumTrack(channel.instrumentType)) channel.instrument.triggerAttack(midi, now, velocity)
+    else channel.instrument.triggerAttack(midiToNoteName(midi), now, velocity)
   }
 
   previewRelease(trackId: string, midi: number): void {
     const channel = this.channels.get(trackId)
-    if (!channel) return
+    if (!channel || !channel.instrument) return
     const now = Tone.getContext().currentTime
-    if (isDrumTrack(channel.instrument)) channel.node.triggerRelease(midi, now)
-    else channel.node.triggerRelease(midiToNoteName(midi), now)
+    if (isDrumTrack(channel.instrumentType)) channel.instrument.triggerRelease(midi, now)
+    else channel.instrument.triggerRelease(midiToNoteName(midi), now)
+  }
+
+  /** 试听一段音频片段（波形编辑器里点击片段头部播放） */
+  previewClip(trackId: string, key: string, offset: number, duration: number): void {
+    const channel = this.channels.get(trackId)
+    if (!channel || channel.kind !== 'audio') return
+    const buffer = this.clipBuffer(key)
+    if (!buffer) return
+    const player = new Tone.Player(buffer)
+    const gain = new Tone.Gain(1)
+    player.connect(gain)
+    gain.connect(channel.entry)
+    player.start(Tone.now(), offset, duration)
+    player.onstop = () => {
+      player.dispose()
+      gain.dispose()
+    }
   }
 
   // ------------------------------------------------------------ 离线渲染 WAV
@@ -455,7 +644,7 @@ class AudioEngine {
    * 用 Tone.Offline 离线渲染整个工程，返回 AudioBuffer。
    * 注意：Tone.Offline 执行期间全局上下文会临时切换到离线上下文，
    * 回调里拿到的 transport 属于该离线上下文，因此节点与排期都在回调内创建。
-   * 这里的信号链与实时播放保持一致（均衡 → 声像 → 推子 → 干声/混响总线 → 限幅）。
+   * 这里的信号链与实时播放保持一致（效果器 → 均衡 → 声像 → 推子 → 干声/混响总线 → 限幅）。
    */
   async renderToAudioBuffer(project: Project): Promise<AudioBuffer> {
     const bpb = beatsPerBarOf(project.timeSignature)
@@ -477,7 +666,10 @@ class AudioEngine {
       master.connect(limiter)
       limiter.toDestination()
 
-      const nodes = new Map<string, InstrumentNode>()
+      /** 每条轨道的统一入口（合成器 / 片段播放器都汇入这里） */
+      const entries = new Map<string, Tone.Gain>()
+      const instruments = new Map<string, InstrumentNode>()
+
       for (const track of project.tracks) {
         const gain = new Tone.Gain(computeTrackGain(track, project.tracks))
         gain.connect(dryBus)
@@ -492,29 +684,69 @@ class AudioEngine {
         const eq = new Tone.EQ3({ low: track.eqLow, mid: track.eqMid, high: track.eqHigh })
         eq.connect(panner)
 
-        const node = createInstrument(track.instrument)
+        const entry = new Tone.Gain(1)
+        entries.set(track.id, entry)
+
+        // 与实时链路一致：入口 → 效果器链 → 均衡
+        let node: Tone.ToneAudioNode = entry
+        for (const effect of track.effects) {
+          if (!effect.enabled) continue
+          const chainItem = buildEffectChain([effect])[0]
+          if (!chainItem) continue
+          node.connect(chainItem.node.input)
+          node = chainItem.node.output
+        }
         node.connect(eq)
-        nodes.set(track.id, node)
+
+        if (track.kind === 'midi') {
+          const instrument = createInstrument(track.instrument)
+          instrument.connect(entry)
+          instruments.set(track.id, instrument)
+        }
       }
 
       for (const track of project.tracks) {
-        const node = nodes.get(track.id)
-        if (!node) continue
+        const entry = entries.get(track.id)
+        if (!entry) continue
+
+        if (track.kind === 'audio') {
+          for (const clip of track.clips) {
+            const pcm = getCachedPcm(clip.key)
+            if (!pcm) continue
+            const player = new Tone.Player({
+              url: pcmToAudioBuffer(pcm),
+              fadeIn: clip.fadeIn * secondsPerBeat,
+              fadeOut: clip.fadeOut * secondsPerBeat
+            })
+            const clipGain = new Tone.Gain(clip.gain)
+            player.connect(clipGain)
+            clipGain.connect(entry)
+            player.sync().start(
+              beatsToTicks(clip.start, transport.PPQ),
+              clip.offset,
+              clip.duration * secondsPerBeat
+            )
+          }
+          continue
+        }
+
+        const instrument = instruments.get(track.id)
+        if (!instrument) continue
         const drum = isDrumTrack(track.instrument)
         for (const region of track.regions) {
           for (const note of region.notes) {
             const at = beatsToTicks(region.start + note.start, transport.PPQ)
             const seconds = note.duration * secondsPerBeat
             transport.schedule((time) => {
-              if (drum) node.triggerAttackRelease(note.midi, seconds, time, note.velocity)
-              else node.triggerAttackRelease(midiToNoteName(note.midi), seconds, time, note.velocity)
+              if (drum) instrument.triggerAttackRelease(note.midi, seconds, time, note.velocity)
+              else instrument.triggerAttackRelease(midiToNoteName(note.midi), seconds, time, note.velocity)
             }, at)
           }
         }
       }
 
       transport.bpm.value = project.bpm
-      transport.timeSignature = bpb
+      transport.timeSignature = timeSignatureParts(project.timeSignature)
       transport.start(0)
     }, duration)
 
@@ -522,6 +754,21 @@ class AudioEngine {
     if (!audioBuffer) throw new Error('离线渲染失败：未得到音频数据')
     return audioBuffer
   }
+}
+
+/** 把 PCM 采样打包成 AudioBuffer（WebAudio 的通用数据容器） */
+function pcmToAudioBuffer(pcm: PcmData): AudioBuffer {
+  const channelCount = pcm.channels.length
+  const length = pcm.channels[0]?.length ?? 0
+  const buffer = new AudioBuffer({
+    numberOfChannels: Math.max(1, channelCount),
+    length: Math.max(1, length),
+    sampleRate: pcm.sampleRate
+  })
+  for (let c = 0; c < channelCount; c += 1) {
+    buffer.getChannelData(c).set(pcm.channels[c])
+  }
+  return buffer
 }
 
 /** 读取电平表数值并归一化到 0~1（normalRange 模式下已是 0~1，这里再做一次保护） */

@@ -17,3 +17,6 @@ export const SCROLLBAR_SIZE = 10
 
 /** 钢琴卷帘底部力度编辑条高度（px） */
 export const VELOCITY_LANE_HEIGHT = 78
+
+/** 钢琴卷帘底部横向缩略导航条高度（px） */
+export const NAV_HEIGHT = 44

@@ -1,16 +1,32 @@
-/* 全局基础样式：暗色简约风格，参考库乐队的低饱和配色 */
+/* 全局基础样式：精致暗色，低饱和、层次分明，参考库乐队的克制配色 */
 :root {
-  --bg: #16171b;
-  --panel: #1e2026;
-  --panel-2: #24262d;
-  --panel-3: #2b2e36;
-  --line: #333744;
-  --text: #dfe2ea;
-  --text-dim: #868b9c;
+  /* 表面层次：由外到内逐级变亮，形成纵深 */
+  --bg: #131418;
+  --panel: #1b1d23;
+  --panel-2: #22252c;
+  --panel-3: #2a2e37;
+  --panel-hover: #333845;
+
+  /* 描边 */
+  --line: #2e3340;
+  --line-strong: #3d4454;
+
+  /* 文本 */
+  --text: #e3e6ee;
+  --text-dim: #8a91a3;
+
+  /* 主题色 */
   --accent: #4f9df7;
+  --accent-soft: rgba(79, 157, 247, 0.14);
   --accent-2: #ff4d6d;
   --ok: #63c78d;
-  --radius: 6px;
+
+  /* 形状与阴影 */
+  --radius: 7px;
+  --radius-lg: 10px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+
   font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
 }
 
@@ -34,6 +50,12 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 统一键盘焦点样式：只在键盘导航时出现，鼠标点击不打扰 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 button {
   font: inherit;
   color: inherit;
@@ -41,13 +63,20 @@ button {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 4px 10px;
+  min-height: 26px;
   cursor: pointer;
-  transition: background 0.16s ease, border-color 0.16s ease, opacity 0.16s ease;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease,
+    box-shadow 0.16s ease, transform 0.08s ease;
 }
 
 button:hover:not(:disabled) {
-  background: #343843;
-  border-color: #4a4f60;
+  background: var(--panel-hover);
+  border-color: var(--line-strong);
+}
+
+/* 按下时轻微下沉，提供触感反馈 */
+button:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 button:disabled {
@@ -60,6 +89,7 @@ button.active {
   border-color: var(--accent);
   color: #0d1117;
   font-weight: 600;
+  box-shadow: 0 0 0 1px var(--accent), 0 2px 8px rgba(79, 157, 247, 0.35);
 }
 
 input,
@@ -70,12 +100,20 @@ select {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 3px 6px;
+  min-height: 26px;
   outline: none;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+input:hover,
+select:hover {
+  border-color: var(--line-strong);
 }
 
 input:focus,
 select:focus {
   border-color: var(--accent);
+  background: var(--panel-3);
 }
 
 input[type='range'] {
@@ -84,6 +122,7 @@ input[type='range'] {
   background: transparent;
   border: none;
   padding: 0;
+  min-height: 0;
   height: 16px;
   cursor: pointer;
 }
@@ -91,18 +130,24 @@ input[type='range'] {
 input[type='range']::-webkit-slider-runnable-track {
   height: 4px;
   border-radius: 2px;
-  background: #3a3e4a;
+  background: #363b47;
 }
 
 input[type='range']::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 12px;
-  height: 12px;
-  margin-top: -4px;
+  width: 13px;
+  height: 13px;
+  margin-top: -4.5px;
   border-radius: 50%;
   background: var(--accent);
-  border: none;
+  border: 2px solid #0d1117;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  transition: transform 0.12s ease;
+}
+
+input[type='range']:hover::-webkit-slider-thumb {
+  transform: scale(1.12);
 }
 
 /* 细滚动条，避免滚动条宽度差异导致时间总轨与钢琴卷帘错位 */
@@ -112,15 +157,21 @@ input[type='range']::-webkit-slider-thumb {
 }
 
 ::-webkit-scrollbar-track {
-  background: #1a1b20;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #3c4050;
+  background: #3a4050;
   border-radius: 5px;
-  border: 2px solid #1a1b20;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #4d5266;
+  background: #4d5470;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }

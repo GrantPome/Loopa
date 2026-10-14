@@ -4,9 +4,10 @@
  * 横向滚动与钢琴卷帘联动（共享 state.view）
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { state, seek } from '@/core/store'
+import { selectAudioClip, state, seek } from '@/core/store'
 import { beatsPerBarOf, clamp } from '@/utils/music'
 import { hexToRgba } from '@/utils/color'
+import { peakRange } from '@/utils/waveform'
 import { KEY_WIDTH, LANE_HEIGHT, MAX_RULER_LANES, RULER_HEIGHT, SCROLLBAR_SIZE } from '@/utils/layout'
 
 const wrapEl = ref<HTMLDivElement | null>(null)
@@ -85,6 +86,45 @@ function draw(): void {
     ctx.fillRect(viewL, y, viewR - viewL, LANE_HEIGHT)
 
     const isActive = track.id === state.selectedTrackId
+
+    // 音频轨：绘制波形片段（用峰值缩略图），选中片段高亮
+    if (track.kind === 'audio') {
+      const secondsPerBeat = 60 / state.project.bpm
+      for (const clip of track.clips) {
+        const x = clip.start * px
+        const clipW = clip.duration * px
+        if (x + clipW < viewL || x > viewR) continue
+        const selected = isActive && clip.id === state.selectedClipId
+        ctx.fillStyle = hexToRgba(track.color, selected ? 0.5 : 0.22)
+        ctx.fillRect(x, y + 2, Math.max(2, clipW), LANE_HEIGHT - 4)
+
+        const buckets = Math.floor(clip.peaks.length / 2)
+        if (buckets > 0 && clip.sourceDuration > 0) {
+          const midY = y + LANE_HEIGHT / 2
+          const amp = (LANE_HEIGHT - 8) / 2
+          const offsetRatio = clip.offset / clip.sourceDuration
+          const usedRatio = (clip.duration * secondsPerBeat) / clip.sourceDuration
+          ctx.fillStyle = hexToRgba(track.color, selected ? 1 : 0.72)
+          const from = Math.max(x, viewL)
+          const to = Math.min(x + clipW, viewR)
+          for (let cx = Math.floor(from); cx < to; cx += 1) {
+            const r0 = (cx - x) / Math.max(1, clipW)
+            const r1 = (cx + 1 - x) / Math.max(1, clipW)
+            const { min, max } = peakRange(
+              clip.peaks,
+              offsetRatio + r0 * usedRatio,
+              offsetRatio + r1 * usedRatio,
+              buckets
+            )
+            const top = midY - max * amp
+            const bottom = midY - min * amp
+            ctx.fillRect(cx, top, 1, Math.max(1, bottom - top))
+          }
+        }
+      }
+      return
+    }
+
     for (const region of track.regions) {
       const x = region.start * px
       const regionWidth = region.length * px
@@ -142,8 +182,25 @@ function beatAtEvent(event: MouseEvent): number {
   return Math.max(0, (event.clientX - rect.left) / state.view.pxPerBeat)
 }
 
+/** 命中测试：判断点击落在哪条音频轨的哪个波形片段上 */
+function clipAt(event: PointerEvent): { trackId: string; clipId: string } | null {
+  const canvas = canvasEl.value
+  if (!canvas) return null
+  const rect = canvas.getBoundingClientRect()
+  const laneIndex = Math.floor((event.clientY - rect.top - RULER_HEIGHT) / LANE_HEIGHT)
+  if (laneIndex < 0) return null
+  const track = state.project.tracks.slice(0, laneCount.value)[laneIndex]
+  if (!track || track.kind !== 'audio') return null
+  const beat = Math.max(0, (event.clientX - rect.left) / state.view.pxPerBeat)
+  const clip = track.clips.find((c) => beat >= c.start && beat <= c.start + c.duration)
+  return clip ? { trackId: track.id, clipId: clip.id } : null
+}
+
 function onPointerDown(event: PointerEvent): void {
   if (event.button !== 0) return
+  // 点到波形片段上时先选中该片段，再照常定位播放头
+  const hit = clipAt(event)
+  if (hit) selectAudioClip(hit.trackId, hit.clipId)
   dragging = true
   ;(event.target as HTMLElement).setPointerCapture(event.pointerId)
   seek(beatAtEvent(event))
@@ -195,7 +252,14 @@ watch(
 )
 
 watch(
-  () => [state.view.pxPerBeat, state.revision, state.playheadBeats, state.selectedTrackId, state.loopOn],
+  () => [
+    state.view.pxPerBeat,
+    state.revision,
+    state.playheadBeats,
+    state.selectedTrackId,
+    state.selectedClipId,
+    state.loopOn
+  ],
   () => requestDraw()
 )
 </script>

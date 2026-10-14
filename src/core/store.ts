@@ -1,5 +1,7 @@
 import { reactive } from 'vue'
 import type {
+  AudioClip,
+  EffectType,
   EqBand,
   GridDivision,
   InstrumentType,
@@ -10,16 +12,53 @@ import type {
   DeviceMode,
   TimeSignature,
   Track,
+  TrackEffect,
+  TrackKind,
   ViewMode,
   VolumeDisplay
 } from '@/types'
-import { EQ_MAX, EQ_MIN, INSTRUMENT_LABELS, LIMITER_MAX, LIMITER_MIN, TRACK_COLORS, VELOCITY_MAX, VELOCITY_MIN } from '@/types'
-import { MAX_MIDI, MIN_MIDI, beatsPerBarOf, clamp, roundBeat, snapTo, uid } from '@/utils/music'
+import {
+  EFFECT_DEF_MAP,
+  EQ_MAX,
+  EQ_MIN,
+  INSTRUMENT_LABELS,
+  LIMITER_MAX,
+  LIMITER_MIN,
+  TIME_SIGNATURE_OPTIONS,
+  TRACK_COLORS,
+  VELOCITY_MAX,
+  VELOCITY_MIN,
+  defaultEffectParams
+} from '@/types'
+import {
+  MAX_MIDI,
+  MIN_MIDI,
+  beatsPerBarOf,
+  clamp,
+  roundBeat,
+  secondsToBeats,
+  snapTo,
+  uid
+} from '@/utils/music'
+import { computePeaks } from '@/utils/waveform'
 import { audioBufferToWavBlob, downloadBlob } from '@/utils/wav'
 import { getAudioEngine } from './audioEngine'
 import * as storage from './persistence'
+import { historyUi, recordChange, redo as redoSnapshot, resetHistory, undo as undoSnapshot } from './history'
+import { parseMidi, projectToMidi } from './midi'
+import {
+  deletePcm,
+  getCachedPcm,
+  preloadPcm,
+  prunePcm,
+  putPcm,
+  type PcmData
+} from './audioStore'
+import { decodeAudioFile, isRecording, recordingSeconds, startRecording, stopRecording } from './recorder'
 
 const engine = getAudioEngine()
+
+export { historyUi }
 
 /** 新轨道的默认混音参数 */
 const DEFAULT_MIX = {
@@ -30,6 +69,9 @@ const DEFAULT_MIX = {
   eqHigh: 0,
   reverbSend: 0.2
 }
+
+/** 音频轨默认不送混响：录进来的声音通常希望保持原样 */
+const DEFAULT_AUDIO_MIX = { ...DEFAULT_MIX, reverbSend: 0 }
 
 /** 视图状态（钢琴卷帘与时间总轨共享，保证两处刻度对齐） */
 export interface ViewState {
@@ -45,9 +87,17 @@ export interface AppState {
   project: Project
   selectedTrackId: string
   selectedNoteIds: string[]
+  /** 当前选中的音频片段 id（波形编辑器使用） */
+  selectedClipId: string
   isPlaying: boolean
   /** 预备拍进行中 */
   isCountingIn: boolean
+  /** 录音进行中 */
+  recording: boolean
+  /** 本次录音的起始位置（拍） */
+  recordingStartBeat: number
+  /** 已录制时长（秒），供界面显示 */
+  recordingSeconds: number
   playheadBeats: number
   snapDivision: GridDivision
   metronomeOn: boolean
@@ -117,17 +167,85 @@ function makeRegion(project: Project): Region {
   }
 }
 
-export function createTrack(project: Project, instrument: InstrumentType, index: number): Track {
+export function createTrack(
+  project: Project,
+  instrument: InstrumentType,
+  index: number,
+  kind: TrackKind = 'midi'
+): Track {
+  const isAudio = kind === 'audio'
   return {
     id: uid('trk'),
-    name: `${INSTRUMENT_LABELS[instrument]} ${index + 1}`,
+    name: isAudio ? `音频轨 ${index + 1}` : `${INSTRUMENT_LABELS[instrument]} ${index + 1}`,
+    kind,
     instrument,
-    ...DEFAULT_MIX,
+    ...(isAudio ? DEFAULT_AUDIO_MIX : DEFAULT_MIX),
+    effects: [],
     mute: false,
     solo: false,
-    color: TRACK_COLORS[index % TRACK_COLORS.length],
-    regions: [makeRegion(project)]
+    color: isAudio ? '#8fa8ff' : TRACK_COLORS[index % TRACK_COLORS.length],
+    // 音频轨不使用片段模型，音符容器留空
+    regions: isAudio ? [] : [makeRegion(project)],
+    clips: []
   }
+}
+
+/** 拍号合法性兜底：非法值统一退回 4/4 */
+function safeTimeSignature(value: unknown): TimeSignature {
+  const found = TIME_SIGNATURE_OPTIONS.find((o) => o.value === value)
+  return found ? found.value : '4/4'
+}
+
+/** 效果器参数补齐：旧数据可能缺键，缺失的用默认值填充 */
+function normalizeEffects(raw: unknown): TrackEffect[] {
+  if (!Array.isArray(raw)) return []
+  const out: TrackEffect[] = []
+  for (const item of raw as Partial<TrackEffect>[]) {
+    const type = item?.type as EffectType | undefined
+    if (!type || !EFFECT_DEF_MAP[type]) continue
+    const defaults = defaultEffectParams(type)
+    const params: Record<string, number> = { ...defaults }
+    const incoming = item?.params ?? {}
+    for (const def of EFFECT_DEF_MAP[type].params) {
+      const value = incoming[def.key]
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        params[def.key] = clamp(value, def.min, def.max)
+      }
+    }
+    out.push({
+      id: item?.id ?? uid('fx'),
+      type,
+      enabled: item?.enabled !== false,
+      params
+    })
+  }
+  return out
+}
+
+/** 音频片段归一化：补齐旧数据缺失字段，保证波形编辑器不会读到 undefined */
+function normalizeClips(raw: unknown): AudioClip[] {
+  if (!Array.isArray(raw)) return []
+  const out: AudioClip[] = []
+  for (const item of raw as Partial<AudioClip>[]) {
+    if (!item?.key) continue
+    const sourceDuration = Number(item.sourceDuration) || 0
+    const sampleRate = Number(item.sampleRate) || 44100
+    out.push({
+      id: item.id ?? uid('clip'),
+      name: item.name ?? '音频',
+      start: Math.max(0, Number(item.start) || 0),
+      duration: Math.max(0.0625, Number(item.duration) || 1),
+      offset: Math.max(0, Number(item.offset) || 0),
+      sourceDuration: sourceDuration > 0 ? sourceDuration : 1,
+      sampleRate,
+      key: item.key,
+      gain: clamp(Number(item.gain ?? 1) || 0, 0, 2),
+      fadeIn: Math.max(0, Number(item.fadeIn) || 0),
+      fadeOut: Math.max(0, Number(item.fadeOut) || 0),
+      peaks: Array.isArray(item.peaks) ? (item.peaks as number[]) : []
+    })
+  }
+  return out
 }
 
 /**
@@ -135,9 +253,12 @@ export function createTrack(project: Project, instrument: InstrumentType, index:
  * 音频引擎与 UI 都假设这些字段一定存在，因此在入口处统一做一次归一化。
  */
 function normalizeTrack(raw: Partial<Track>, index: number): Track {
+  const kind: TrackKind = raw.kind === 'audio' ? 'audio' : 'midi'
+  const isAudio = kind === 'audio'
   return {
     id: raw.id ?? uid('trk'),
     name: raw.name ?? `轨道 ${index + 1}`,
+    kind,
     instrument: (raw.instrument ?? 'piano') as InstrumentType,
     volume: clamp(raw.volume ?? DEFAULT_MIX.volume, 0, 1),
     pan: clamp(raw.pan ?? DEFAULT_MIX.pan, -1, 1),
@@ -145,22 +266,26 @@ function normalizeTrack(raw: Partial<Track>, index: number): Track {
     eqMid: clamp(raw.eqMid ?? DEFAULT_MIX.eqMid, EQ_MIN, EQ_MAX),
     eqHigh: clamp(raw.eqHigh ?? DEFAULT_MIX.eqHigh, EQ_MIN, EQ_MAX),
     reverbSend: clamp(raw.reverbSend ?? DEFAULT_MIX.reverbSend, 0, 1),
+    effects: normalizeEffects(raw.effects),
     mute: Boolean(raw.mute),
     solo: Boolean(raw.solo),
     color: raw.color ?? TRACK_COLORS[index % TRACK_COLORS.length],
-    regions: (raw.regions ?? []).map((r) => ({
-      id: r.id ?? uid('rgn'),
-      name: r.name ?? '片段',
-      start: r.start ?? 0,
-      length: r.length ?? 0,
-      notes: (r.notes ?? []).map((n) => ({
-        id: n.id ?? uid('note'),
-        midi: n.midi ?? 60,
-        start: n.start ?? 0,
-        duration: n.duration ?? 0.25,
-        velocity: n.velocity ?? 0.85
-      }))
-    }))
+    regions: isAudio
+      ? []
+      : (raw.regions ?? []).map((r) => ({
+          id: r.id ?? uid('rgn'),
+          name: r.name ?? '片段',
+          start: r.start ?? 0,
+          length: r.length ?? 0,
+          notes: (r.notes ?? []).map((n) => ({
+            id: n.id ?? uid('note'),
+            midi: n.midi ?? 60,
+            start: n.start ?? 0,
+            duration: n.duration ?? 0.25,
+            velocity: n.velocity ?? 0.85
+          }))
+        })),
+    clips: normalizeClips(raw.clips)
   }
 }
 
@@ -170,7 +295,7 @@ export function normalizeProject(raw: Partial<Project>, fallbackName = '未命�
     ...base,
     ...raw,
     bpm: clamp(raw.bpm ?? base.bpm, 40, 200),
-    timeSignature: (raw.timeSignature ?? base.timeSignature) as TimeSignature,
+    timeSignature: safeTimeSignature(raw.timeSignature ?? base.timeSignature),
     masterVolume: clamp(raw.masterVolume ?? base.masterVolume, 0, 1),
     reverbWet: clamp(raw.reverbWet ?? base.reverbWet, 0, 1),
     masterLimiter: clamp(raw.masterLimiter ?? base.masterLimiter, LIMITER_MIN, LIMITER_MAX),
@@ -187,8 +312,12 @@ export const state = reactive<AppState>({
   project: createEmptyProject(),
   selectedTrackId: '',
   selectedNoteIds: [],
+  selectedClipId: '',
   isPlaying: false,
   isCountingIn: false,
+  recording: false,
+  recordingStartBeat: 0,
+  recordingSeconds: 0,
   playheadBeats: 0,
   snapDivision: 0.25,
   metronomeOn: false,
@@ -236,9 +365,13 @@ export function initStore(): void {
     if (trackId === state.selectedTrackId) highlightPitch(midi)
   }
 
+  resetHistory(state.project)
   startTickLoop()
   applyProjectToEngine()
   syncNow()
+  // 音频采样存在 IndexedDB，异步预热后再重排一次，让波形片段可以播放
+  void hydrateAudio()
+  void pruneOrphanAudio()
 }
 
 /** 把工程级的播放参数同步给音频引擎 */
@@ -260,6 +393,33 @@ function seedDefaultTracks(): void {
 }
 
 /**
+ * 收集工程中全部音频片段引用的采样键。
+ * 注意：这里也会对 localStorage 里的「历史工程」原始数据调用，
+ * 它们可能是引入音频轨之前的旧结构（缺少 tracks / clips），因此逐层兜底。
+ */
+function collectClipKeys(project: Project): string[] {
+  const keys = new Set<string>()
+  ;(project.tracks ?? []).forEach((t) => (t.clips ?? []).forEach((c) => keys.add(c.key)))
+  return Array.from(keys)
+}
+
+/** 把工程里用到的采样读入内存缓存，供音频引擎同步取用 */
+async function hydrateAudio(): Promise<void> {
+  const keys = collectClipKeys(state.project)
+  if (keys.length === 0) return
+  const loaded = await preloadPcm(keys)
+  if (loaded.length > 0) commit()
+}
+
+/** 清理所有历史工程都不再引用的采样，避免 IndexedDB 无限膨胀 */
+async function pruneOrphanAudio(): Promise<void> {
+  const keep = new Set<string>()
+  storage.readProjects().forEach((p) => collectClipKeys(p).forEach((k) => keep.add(k)))
+  collectClipKeys(state.project).forEach((k) => keep.add(k))
+  await prunePcm(Array.from(keep))
+}
+
+/**
  * 统一的心跳循环（requestAnimationFrame）：
  * 1. 同步播放头位置与播放状态
  * 2. 采样各轨道与总线的实时电平
@@ -274,6 +434,7 @@ function startTickLoop(): void {
     state.isPlaying = engine.isPlaying
     state.playheadBeats = engine.getBeats()
     if (state.isCountingIn && engine.getBeats() > 0) state.isCountingIn = false
+    if (state.recording) state.recordingSeconds = recordingSeconds()
 
     // 仅在音频上下文就绪后才采样电平，避免未初始化时读到无意义的 0
     if (state.audioReady) sampleLevels()
@@ -310,6 +471,15 @@ export function commit(): void {
   syncRequestedAt = performance.now()
 }
 
+/**
+ * 记录一步可撤销的改动。
+ * 连续型操作（拖推子、拖力度）传入相同的 coalesceKey，会被合并成一步，
+ * 避免一次拖拽产生几十条历史记录。
+ */
+function record(label: string, coalesceKey = ''): void {
+  recordChange(state.project, label, coalesceKey)
+}
+
 /** 立即把当前工程同步到音频引擎并写入 localStorage */
 function syncNow(): void {
   engine.syncTracks(state.project)
@@ -328,6 +498,44 @@ function persistOnly(): void {
   state.savedProjects = storage.readMetas()
 }
 
+// ---------------------------------------------------------------- 撤销 / 重做
+
+/** 把快照应用回当前工程（撤销/重做的统一入口，不再产生新的历史记录） */
+function applySnapshot(snapshot: Project): void {
+  stop()
+  const project = normalizeProject(snapshot)
+  state.project = project
+  if (!project.tracks.some((t) => t.id === state.selectedTrackId)) {
+    state.selectedTrackId = project.tracks[0]?.id ?? ''
+  }
+  state.selectedNoteIds = []
+  state.selectedClipId = ''
+  applyProjectToEngine()
+  commit()
+  syncNow()
+  void hydrateAudio()
+}
+
+export function undo(): void {
+  const snapshot = undoSnapshot(state.project)
+  if (!snapshot) {
+    state.statusText = '没有可撤销的操作'
+    return
+  }
+  applySnapshot(snapshot)
+  state.statusText = `已撤销：${historyUi.redoLabel || '编辑'}`
+}
+
+export function redo(): void {
+  const snapshot = redoSnapshot(state.project)
+  if (!snapshot) {
+    state.statusText = '没有可重做的操作'
+    return
+  }
+  applySnapshot(snapshot)
+  state.statusText = `已重做：${historyUi.undoLabel || '编辑'}`
+}
+
 // ---------------------------------------------------------------- 轨道操作
 
 export function activeTrack(): Track | undefined {
@@ -342,6 +550,18 @@ export function selectTrack(id: string): void {
   if (state.selectedTrackId === id) return
   state.selectedTrackId = id
   state.selectedNoteIds = []
+  state.selectedClipId = ''
+  alignViewModeWithTrack(state.project.tracks.find((t) => t.id === id))
+}
+
+/**
+ * 让中央编辑区视图与轨道类型保持一致：
+ * 选中音频轨时从钢琴卷帘切到波形视图，选中 MIDI 轨时从波形视图切回钢琴卷帘。
+ * 混音台视图由用户显式选择，不做自动切换。
+ */
+function alignViewModeWithTrack(track: Track | undefined): void {
+  if (track?.kind === 'audio' && state.viewMode === 'piano') state.viewMode = 'audio'
+  else if (track?.kind === 'midi' && state.viewMode === 'audio') state.viewMode = 'piano'
 }
 
 export function addTrack(instrument: InstrumentType = 'piano'): void {
@@ -349,17 +569,39 @@ export function addTrack(instrument: InstrumentType = 'piano'): void {
   state.project.tracks.push(track)
   state.selectedTrackId = track.id
   state.selectedNoteIds = []
+  state.selectedClipId = ''
+  record(`新增轨道：${track.name}`)
   commit()
+}
+
+/** 新增一条空音频轨（等待录音或导入音频文件填充） */
+export function addAudioTrack(): string {
+  const track = createTrack(state.project, 'piano', state.project.tracks.length, 'audio')
+  state.project.tracks.push(track)
+  state.selectedTrackId = track.id
+  state.selectedNoteIds = []
+  state.selectedClipId = ''
+  // 新建音频轨后直接进入波形视图，方便立刻录音或导入
+  state.viewMode = 'audio'
+  record(`新增轨道：${track.name}`)
+  commit()
+  return track.id
 }
 
 export function removeTrack(id: string): void {
   const index = state.project.tracks.findIndex((t) => t.id === id)
   if (index < 0) return
-  state.project.tracks.splice(index, 1)
+  const [removed] = state.project.tracks.splice(index, 1)
+  // 被删除轨道的采样若已无人引用，同步从 IndexedDB 清掉
+  void releaseUnusedPcm(removed.clips.map((c) => c.key))
   if (state.selectedTrackId === id) {
-    state.selectedTrackId = state.project.tracks[Math.min(index, state.project.tracks.length - 1)]?.id ?? ''
+    const nextId = state.project.tracks[Math.min(index, state.project.tracks.length - 1)]?.id ?? ''
+    state.selectedTrackId = nextId
     state.selectedNoteIds = []
+    state.selectedClipId = ''
+    alignViewModeWithTrack(state.project.tracks.find((t) => t.id === nextId))
   }
+  record(`删除轨道：${removed.name}`)
   commit()
 }
 
@@ -371,6 +613,7 @@ export function moveTrack(id: string, dir: -1 | 1): void {
   if (index < 0 || target < 0 || target >= tracks.length) return
   const [item] = tracks.splice(index, 1)
   tracks.splice(target, 0, item)
+  record('调整轨道顺序')
   commit()
 }
 
@@ -378,13 +621,15 @@ export function renameTrack(id: string, name: string): void {
   const track = state.project.tracks.find((t) => t.id === id)
   if (!track) return
   track.name = name || track.name
+  record('重命名轨道')
   commit()
 }
 
 export function setTrackInstrument(id: string, instrument: InstrumentType): void {
   const track = state.project.tracks.find((t) => t.id === id)
-  if (!track || track.instrument === instrument) return
+  if (!track || track.kind === 'audio' || track.instrument === instrument) return
   track.instrument = instrument
+  record(`切换音色：${INSTRUMENT_LABELS[instrument]}`)
   commit()
 }
 
@@ -395,6 +640,7 @@ export function setTrackVolume(id: string, volume: number): void {
   if (!track) return
   track.volume = clamp(volume, 0, 1)
   engine.updateMix(track, state.project.tracks)
+  record('调整音量', `vol:${id}`)
   persistOnly()
 }
 
@@ -403,6 +649,7 @@ export function setTrackPan(id: string, pan: number): void {
   if (!track) return
   track.pan = clamp(pan, -1, 1)
   engine.updateMix(track, state.project.tracks)
+  record('调整声像', `pan:${id}`)
   persistOnly()
 }
 
@@ -412,6 +659,7 @@ export function setTrackEq(id: string, band: EqBand, value: number): void {
   if (!track) return
   track[band] = clamp(value, EQ_MIN, EQ_MAX)
   engine.setTrackEq(id, band, track[band])
+  record('调整均衡', `eq:${id}:${band}`)
   persistOnly()
 }
 
@@ -421,6 +669,7 @@ export function setTrackReverbSend(id: string, value: number): void {
   if (!track) return
   track.reverbSend = clamp(value, 0, 1)
   engine.setTrackReverbSend(id, track.reverbSend)
+  record('调整混响发送', `send:${id}`)
   persistOnly()
 }
 
@@ -428,13 +677,15 @@ export function setTrackReverbSend(id: string, value: number): void {
 export function resetTrackMix(id: string): void {
   const track = state.project.tracks.find((t) => t.id === id)
   if (!track) return
-  track.volume = DEFAULT_MIX.volume
-  track.pan = DEFAULT_MIX.pan
-  track.eqLow = DEFAULT_MIX.eqLow
-  track.eqMid = DEFAULT_MIX.eqMid
-  track.eqHigh = DEFAULT_MIX.eqHigh
-  track.reverbSend = DEFAULT_MIX.reverbSend
+  const base = track.kind === 'audio' ? DEFAULT_AUDIO_MIX : DEFAULT_MIX
+  track.volume = base.volume
+  track.pan = base.pan
+  track.eqLow = base.eqLow
+  track.eqMid = base.eqMid
+  track.eqHigh = base.eqHigh
+  track.reverbSend = base.reverbSend
   engine.updateMix(track, state.project.tracks)
+  record('复位混音')
   persistOnly()
 }
 
@@ -443,6 +694,7 @@ export function toggleMute(id: string): void {
   if (!track) return
   track.mute = !track.mute
   engine.updateAllMix(state.project)
+  record(track.mute ? '静音轨道' : '取消静音')
   commit()
 }
 
@@ -451,6 +703,97 @@ export function toggleSolo(id: string): void {
   if (!track) return
   track.solo = !track.solo
   engine.updateAllMix(state.project)
+  record(track.solo ? '独奏轨道' : '取消独奏')
+  commit()
+}
+
+// ---------------------------------------------------------------- 效果器
+
+/** 把效果器链推给音频引擎（结构变化会重建链路，仅参数变化则原地更新） */
+function pushEffects(track: Track): void {
+  engine.updateTrackEffects(track)
+}
+
+export function addEffect(trackId: string, type: EffectType): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  if (!track) return
+  const effect: TrackEffect = {
+    id: uid('fx'),
+    type,
+    enabled: true,
+    params: defaultEffectParams(type)
+  }
+  track.effects.push(effect)
+  pushEffects(track)
+  record(`添加效果器：${EFFECT_DEF_MAP[type].label}`)
+  commit()
+}
+
+export function removeEffect(trackId: string, effectId: string): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  if (!track) return
+  const index = track.effects.findIndex((e) => e.id === effectId)
+  if (index < 0) return
+  const [removed] = track.effects.splice(index, 1)
+  pushEffects(track)
+  record(`移除效果器：${EFFECT_DEF_MAP[removed.type].label}`)
+  commit()
+}
+
+export function toggleEffect(trackId: string, effectId: string): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  const effect = track?.effects.find((e) => e.id === effectId)
+  if (!track || !effect) return
+  effect.enabled = !effect.enabled
+  pushEffects(track)
+  record(effect.enabled ? '启用效果器' : '停用效果器')
+  commit()
+}
+
+/** 调整效果器参数（拖动滑块时用 coalesceKey 合并成一步） */
+export function setEffectParam(trackId: string, effectId: string, key: string, value: number): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  const effect = track?.effects.find((e) => e.id === effectId)
+  if (!track || !effect) return
+  const def = EFFECT_DEF_MAP[effect.type].params.find((p) => p.key === key)
+  if (!def) return
+  effect.params[key] = clamp(value, def.min, def.max)
+  pushEffects(track)
+  record('调整效果器参数', `fx:${trackId}:${effectId}:${key}`)
+  persistOnly()
+}
+
+/** 重置某个效果器为默认参数 */
+export function resetEffect(trackId: string, effectId: string): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  const effect = track?.effects.find((e) => e.id === effectId)
+  if (!track || !effect) return
+  effect.params = defaultEffectParams(effect.type)
+  pushEffects(track)
+  record('重置效果器参数')
+  commit()
+}
+
+/** 调整效果器在链中的顺序（顺序会影响听感） */
+export function moveEffect(trackId: string, effectId: string, dir: -1 | 1): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  if (!track) return
+  const index = track.effects.findIndex((e) => e.id === effectId)
+  const target = index + dir
+  if (index < 0 || target < 0 || target >= track.effects.length) return
+  const [item] = track.effects.splice(index, 1)
+  track.effects.splice(target, 0, item)
+  pushEffects(track)
+  record('调整效果器顺序')
+  commit()
+}
+
+export function clearEffects(trackId: string): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  if (!track || track.effects.length === 0) return
+  track.effects = []
+  pushEffects(track)
+  record('清空效果器')
   commit()
 }
 
@@ -489,6 +832,7 @@ export function removeNotes(ids: string[]): void {
   const set = new Set(ids)
   region.notes = region.notes.filter((n) => !set.has(n.id))
   state.selectedNoteIds = state.selectedNoteIds.filter((id) => !set.has(id))
+  record(`删除 ${set.size} 个音符`)
   commit()
 }
 
@@ -513,6 +857,7 @@ export function quantizeSelected(): number {
     const snapped = snapTo(note.duration, grid)
     note.duration = roundBeat(Math.max(grid, snapped))
   })
+  record(`量化 ${targets.length} 个音符`)
   commit()
   return targets.length
 }
@@ -569,6 +914,7 @@ export function applyNoteVelocities(entries: { id: string; velocity: number }[])
     const value = map.get(note.id)
     if (value !== undefined) note.velocity = value
   }
+  record('调整力度', 'velocity')
   commit()
 }
 
@@ -622,6 +968,7 @@ export function patchSelectedNotes(
     maxEnd = Math.max(maxEnd, note.start + note.duration)
   }
   ensureBarsForBeat(maxEnd)
+  record('修改音符属性')
   commit()
 }
 
@@ -632,6 +979,7 @@ export function transposeSelectedNotes(semitones: number): void {
   for (const note of notes) {
     note.midi = clamp(note.midi + semitones, MIN_MIDI, MAX_MIDI)
   }
+  record(`移调 ${semitones > 0 ? '+' : ''}${semitones} 半音`)
   commit()
 }
 
@@ -679,6 +1027,7 @@ export function pasteNotes(): number {
   }
   state.selectedNoteIds = created.map((n) => n.id)
   ensureBarsForBeat(maxEnd)
+  record(`粘贴 ${created.length} 个音符`)
   commit()
   return created.length
 }
@@ -700,8 +1049,333 @@ export function duplicateSelectedNotes(): number {
   }
   state.selectedNoteIds = created.map((n) => n.id)
   ensureBarsForBeat(maxEnd)
+  record(`再制 ${created.length} 个音符`)
   commit()
   return created.length
+}
+
+// ------------------------------------------------------------ 音频片段
+
+/** 音频片段的时间换算：1 拍 = 60 / bpm 秒 */
+function secondsPerBeat(): number {
+  return 60 / state.project.bpm
+}
+
+/** 判断某个采样键是否还有别的片段在用（拆分后的片段会共用同一份采样） */
+function isPcmKeyStillUsed(key: string, excludeClipId = ''): boolean {
+  return state.project.tracks.some((t) =>
+    t.clips.some((c) => c.key === key && c.id !== excludeClipId)
+  )
+}
+
+/** 采样不再被任何片段引用时，从 IndexedDB 中删除 */
+async function releaseUnusedPcm(keys: string[]): Promise<void> {
+  for (const key of keys) {
+    if (!isPcmKeyStillUsed(key)) await deletePcm(key)
+  }
+}
+
+export function selectClip(id: string): void {
+  state.selectedClipId = id
+}
+
+export function activeClip(): AudioClip | undefined {
+  const track = activeTrack()
+  if (!track || track.kind !== 'audio') return undefined
+  return track.clips.find((c) => c.id === state.selectedClipId) ?? track.clips[0]
+}
+
+/** 选中音频轨中指定片段（并切换选中轨道） */
+export function selectAudioClip(trackId: string, clipId: string): void {
+  state.selectedTrackId = trackId
+  state.selectedClipId = clipId
+  state.selectedNoteIds = []
+  alignViewModeWithTrack(state.project.tracks.find((t) => t.id === trackId))
+}
+
+/**
+ * 把一段 PCM 采样落成音频片段。
+ * 采样写入 IndexedDB，工程 JSON 里只留元信息与降采样峰值。
+ */
+export async function createClipFromPcm(
+  pcm: PcmData,
+  startBeat: number,
+  name: string,
+  targetTrackId = ''
+): Promise<string | null> {
+  if (pcm.channels.length === 0 || pcm.channels[0].length === 0) return null
+
+  let track = targetTrackId
+    ? state.project.tracks.find((t) => t.id === targetTrackId)
+    : undefined
+  if (!track || track.kind !== 'audio') {
+    track = state.project.tracks.find((t) => t.kind === 'audio' && t.id === state.selectedTrackId)
+  }
+  if (!track) {
+    // 没有可用的音频轨就新建一条，保证录音/导入一定落到音频轨上
+    const created = createTrack(state.project, 'piano', state.project.tracks.length, 'audio')
+    state.project.tracks.push(created)
+    track = created
+  }
+
+  const sourceSeconds = pcm.channels[0].length / pcm.sampleRate
+  const durationBeats = roundBeat(Math.max(0.25, secondsToBeats(sourceSeconds, state.project.bpm)))
+  const key = uid('pcm')
+  await putPcm(key, pcm)
+
+  const clip: AudioClip = {
+    id: uid('clip'),
+    name,
+    start: roundBeat(Math.max(0, startBeat)),
+    duration: durationBeats,
+    offset: 0,
+    sourceDuration: sourceSeconds,
+    sampleRate: pcm.sampleRate,
+    key,
+    gain: 1,
+    fadeIn: 0,
+    fadeOut: 0,
+    peaks: computePeaks(pcm.channels)
+  }
+
+  track.clips.push(clip)
+  ensureBarsForBeat(clip.start + clip.duration)
+  state.selectedTrackId = track.id
+  state.selectedNoteIds = []
+  state.selectedClipId = clip.id
+  record(`新增音频片段：${name}`)
+  commit()
+  return clip.id
+}
+
+/** 移动片段（拖动改变起始位置） */
+export function moveClip(trackId: string, clipId: string, start: number): void {
+  const clip = state.project.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId)
+  if (!clip) return
+  clip.start = roundBeat(Math.max(0, start))
+  ensureBarsForBeat(clip.start + clip.duration)
+  record('移动音频片段', `clip:${clipId}:move`)
+  commit()
+}
+
+/**
+ * 修剪 / 拉伸片段。
+ * offset 是相对源音频起点的偏移（秒），duration 是时间轴上的时长（拍），
+ * 两者联动，保证不会超出源音频的长度。
+ */
+export function resizeClip(
+  trackId: string,
+  clipId: string,
+  patch: { start?: number; offset?: number; duration?: number }
+): void {
+  const clip = state.project.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId)
+  if (!clip) return
+
+  const spb = secondsPerBeat()
+  const minDuration = 0.125
+  let offset = patch.offset ?? clip.offset
+  let duration = patch.duration ?? clip.duration
+  let start = patch.start ?? clip.start
+
+  offset = Math.max(0, Math.min(offset, Math.max(0, clip.sourceDuration - minDuration * spb)))
+  // 源音频剩余长度（拍）限制了片段最大时长
+  const maxBeats = Math.max(minDuration, (clip.sourceDuration - offset) / spb)
+  duration = Math.max(minDuration, Math.min(duration, maxBeats))
+  start = Math.max(0, start)
+
+  clip.offset = Math.round(offset * 1000) / 1000
+  clip.duration = roundBeat(duration)
+  clip.start = roundBeat(start)
+  ensureBarsForBeat(clip.start + clip.duration)
+  record('修剪音频片段', `clip:${clipId}:trim`)
+  commit()
+}
+
+/** 片段增益（0~2） */
+export function setClipGain(trackId: string, clipId: string, gain: number): void {
+  const clip = state.project.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId)
+  if (!clip) return
+  clip.gain = clamp(gain, 0, 2)
+  record('调整片段增益', `clip:${clipId}:gain`)
+  commit()
+}
+
+/** 淡入 / 淡出时长（拍） */
+export function setClipFade(
+  trackId: string,
+  clipId: string,
+  edge: 'in' | 'out',
+  beats: number
+): void {
+  const clip = state.project.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId)
+  if (!clip) return
+  const value = Math.max(0, Math.min(roundBeat(beats), clip.duration))
+  if (edge === 'in') clip.fadeIn = value
+  else clip.fadeOut = value
+  record('调整淡入淡出', `clip:${clipId}:fade:${edge}`)
+  commit()
+}
+
+export function renameClip(trackId: string, clipId: string, name: string): void {
+  const clip = state.project.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId)
+  if (!clip) return
+  clip.name = name || clip.name
+  record('重命名音频片段')
+  commit()
+}
+
+/** 删除片段（采样若无人引用则一并清理） */
+export function removeClip(trackId: string, clipId: string): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  if (!track) return
+  const index = track.clips.findIndex((c) => c.id === clipId)
+  if (index < 0) return
+  const [removed] = track.clips.splice(index, 1)
+  if (state.selectedClipId === clipId) state.selectedClipId = track.clips[0]?.id ?? ''
+  void releaseUnusedPcm([removed.key])
+  record('删除音频片段')
+  commit()
+}
+
+/** 在指定位置把片段一分为二 */
+export function splitClip(trackId: string, clipId: string, beat: number): boolean {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  const clip = track?.clips.find((c) => c.id === clipId)
+  if (!track || !clip) return false
+  const local = beat - clip.start
+  if (local <= 0.0625 || local >= clip.duration - 0.0625) return false
+
+  const spb = secondsPerBeat()
+  const right: AudioClip = {
+    ...clip,
+    id: uid('clip'),
+    name: `${clip.name} B`,
+    start: roundBeat(clip.start + local),
+    duration: roundBeat(clip.duration - local),
+    offset: Math.round((clip.offset + local * spb) * 1000) / 1000,
+    // 拆分后两段共用同一份采样与峰值，因此采样键保持不变
+    peaks: clip.peaks
+  }
+  clip.duration = roundBeat(local)
+  clip.name = `${clip.name} A`
+  track.clips.push(right)
+  state.selectedClipId = right.id
+  record('拆分音频片段')
+  commit()
+  return true
+}
+
+/** 复制片段（共用同一份采样，不重复占存储） */
+export function duplicateClip(trackId: string, clipId: string): void {
+  const track = state.project.tracks.find((t) => t.id === trackId)
+  const clip = track?.clips.find((c) => c.id === clipId)
+  if (!track || !clip) return
+  const copy: AudioClip = {
+    ...clip,
+    id: uid('clip'),
+    name: `${clip.name} 副本`,
+    start: roundBeat(clip.start + clip.duration)
+  }
+  track.clips.push(copy)
+  ensureBarsForBeat(copy.start + copy.duration)
+  state.selectedClipId = copy.id
+  record('复制音频片段')
+  commit()
+}
+
+// ------------------------------------------------------------ 录音 / 音频导入
+
+/** 开始录音：从当前播放头位置走带，同时采集麦克风 */
+export async function beginRecording(): Promise<void> {
+  if (state.recording) return
+  await ensureAudio()
+  try {
+    state.recordingStartBeat = roundBeat(Math.max(0, state.playheadBeats))
+    await startRecording()
+  } catch (error) {
+    state.statusText = `录音失败：${(error as Error).message}`
+    return
+  }
+  state.recording = true
+  state.recordingSeconds = 0
+  state.statusText = '录音中…'
+
+  if (!engine.isPlaying) {
+    applyProjectToEngine()
+    // 录音不走预备拍，否则预备拍的点击声会被一起录进去
+    engine.setMetronome(state.metronomeOn, false)
+    engine.syncTracks(state.project)
+    engine.scheduleProject(state.project)
+    engine.updateAllMix(state.project)
+    await engine.play()
+    state.isPlaying = true
+  }
+}
+
+/** 结束录音：停止走带，把采集到的采样落成音频片段 */
+export async function endRecording(): Promise<void> {
+  if (!state.recording) return
+  const startBeat = state.recordingStartBeat
+  const pcm = await stopRecording()
+  state.recording = false
+  state.recordingSeconds = 0
+  pause()
+  // 恢复工程原本的预备拍设置
+  applyProjectToEngine()
+
+  if (!pcm) {
+    state.statusText = '录音未采集到有效音频'
+    return
+  }
+  const clipId = await createClipFromPcm(pcm, startBeat, `录音 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`)
+  state.statusText = clipId ? '录音完成，已生成音频片段' : '录音失败：采样为空'
+}
+
+/** 录音开关（工具栏按钮使用） */
+export async function toggleRecording(): Promise<void> {
+  if (state.recording) await endRecording()
+  else await beginRecording()
+}
+
+/** 导入音频文件为新的音频片段 */
+export async function importAudioFile(file: File): Promise<void> {
+  await ensureAudio()
+  state.busy = true
+  state.statusText = '正在解析音频文件…'
+  try {
+    const pcm = await decodeAudioFile(file)
+    const start = roundBeat(Math.max(0, state.playheadBeats))
+    const name = file.name.replace(/\.[^.]+$/, '')
+    const clipId = await createClipFromPcm(pcm, start, name || '导入音频')
+    state.statusText = clipId ? `已导入音频：${name}` : '导入失败：音频为空'
+  } catch (error) {
+    state.statusText = `导入音频失败：${(error as Error).message}`
+  } finally {
+    state.busy = false
+  }
+}
+
+/** 当前是否正在录音（供界面绑定） */
+export function recordingActive(): boolean {
+  return state.recording && isRecording()
+}
+
+/** 片段采样是否已就绪（未就绪时波形不可播放） */
+export function isClipPlayable(clip: AudioClip): boolean {
+  return getCachedPcm(clip.key) !== null
+}
+
+/** 试听当前选中的音频片段（波形编辑器的「试听」按钮调用） */
+export async function previewActiveClip(): Promise<void> {
+  const clip = activeClip()
+  const track = activeTrack()
+  if (!clip || !track || track.kind !== 'audio') return
+  await ensureAudio()
+  if (!isClipPlayable(clip)) {
+    state.statusText = '音频采样尚未就绪，请稍候再试'
+    return
+  }
+  engine.previewClip(track.id, clip.key, clip.offset, clip.duration * secondsPerBeat())
 }
 
 // ------------------------------------------------------------ 工程级设置
@@ -709,6 +1383,7 @@ export function duplicateSelectedNotes(): number {
 export function setBpm(bpm: number): void {
   state.project.bpm = clamp(Math.round(bpm), 40, 200)
   engine.setBpm(state.project.bpm)
+  record('调整速度')
   commit()
 }
 
@@ -718,12 +1393,14 @@ export function setTimeSignature(ts: TimeSignature): void {
   engine.setTimeSignature(ts)
   const total = state.project.bars * beatsPerBarOf(ts)
   state.project.tracks.forEach((t) => t.regions.forEach((r) => (r.length = total)))
+  record(`切换拍号：${ts}`)
   commit()
 }
 
 export function setMasterVolume(volume: number): void {
   state.project.masterVolume = clamp(volume, 0, 1)
   engine.setMasterVolume(state.project.masterVolume)
+  record('调整总音量', 'master:vol')
   persistOnly()
 }
 
@@ -731,6 +1408,7 @@ export function setMasterVolume(volume: number): void {
 export function setReverbWet(wet: number): void {
   state.project.reverbWet = clamp(wet, 0, 1)
   engine.setReverbWet(state.project.reverbWet)
+  record('调整混响返回', 'master:wet')
   persistOnly()
 }
 
@@ -738,6 +1416,7 @@ export function setReverbWet(wet: number): void {
 export function setLimiterThreshold(db: number): void {
   state.project.masterLimiter = clamp(db, LIMITER_MIN, LIMITER_MAX)
   engine.setLimiterThreshold(state.project.masterLimiter)
+  record('调整限幅阈值', 'master:lim')
   persistOnly()
 }
 
@@ -817,6 +1496,7 @@ export function toggleLoop(): void {
 
 export function renameProject(name: string): void {
   state.project.name = name || state.project.name
+  record('重命名工程')
   persistOnly()
 }
 
@@ -830,6 +1510,7 @@ export async function ensureAudio(): Promise<void> {
   // 引擎链路刚构建时用的是默认值，这里把工程里保存的混音参数补上
   applyProjectToEngine()
   syncNow()
+  await hydrateAudio()
 }
 
 export async function play(): Promise<void> {
@@ -908,7 +1589,9 @@ export function newProject(): void {
   seedDefaultTracks()
   state.selectedTrackId = state.project.tracks[0]?.id ?? ''
   state.selectedNoteIds = []
+  state.selectedClipId = ''
   state.view.scrollLeft = 0
+  resetHistory(state.project)
   commit()
   applyProjectToEngine()
   syncNow()
@@ -927,10 +1610,13 @@ export function loadProjectById(id: string): void {
   state.project = project
   state.selectedTrackId = project.tracks[0]?.id ?? ''
   state.selectedNoteIds = []
+  state.selectedClipId = ''
   state.view.scrollLeft = 0
+  resetHistory(project)
   applyProjectToEngine()
   commit()
   syncNow()
+  void hydrateAudio()
   state.statusText = `已加载：${project.name}`
 }
 
@@ -958,13 +1644,81 @@ export async function importProjectJson(file: File): Promise<void> {
     state.project = project
     state.selectedTrackId = project.tracks[0]?.id ?? ''
     state.selectedNoteIds = []
+    state.selectedClipId = ''
     state.view.scrollLeft = 0
+    resetHistory(project)
     applyProjectToEngine()
     commit()
     syncNow()
+    await hydrateAudio()
     state.statusText = `已导入：${project.name}`
   } catch (error) {
     state.statusText = `导入失败：${(error as Error).message}`
+  }
+}
+
+// ---------------------------------------------------------------- MIDI 读写
+
+/** 导出 MIDI 文件（音频轨无法写入 SMF，只导出 MIDI 轨） */
+export function exportMidi(): void {
+  try {
+    const blob = projectToMidi(state.project)
+    downloadBlob(blob, `${state.project.name || 'project'}.mid`)
+    state.statusText = '已导出 MIDI 文件'
+  } catch (error) {
+    state.statusText = `导出 MIDI 失败：${(error as Error).message}`
+  }
+}
+
+/**
+ * 导入 MIDI 文件。
+ * 采用「追加轨道」而不是替换工程，避免误操作丢失当前内容；
+ * 仅当当前工程还没有任何音符时，才沿用文件里的速度与拍号。
+ */
+export async function importMidiFile(file: File): Promise<void> {
+  try {
+    const buffer = await file.arrayBuffer()
+    const result = parseMidi(buffer)
+    if (result.tracks.length === 0) {
+      state.statusText = '该 MIDI 文件里没有可导入的音符'
+      return
+    }
+
+    const existingNotes = state.project.tracks.reduce(
+      (sum, t) => sum + t.regions.reduce((s, r) => s + r.notes.length, 0),
+      0
+    )
+    if (existingNotes === 0) {
+      state.project.bpm = clamp(result.bpm, 40, 200)
+      state.project.timeSignature = result.timeSignature
+      engine.setBpm(state.project.bpm)
+      engine.setTimeSignature(state.project.timeSignature)
+    }
+
+    let maxEnd = 0
+    for (const imported of result.tracks) {
+      const track = createTrack(state.project, imported.instrument, state.project.tracks.length)
+      track.name = imported.name
+      const region = track.regions[0]
+      if (region) {
+        region.name = imported.name
+        region.notes = imported.notes
+        imported.notes.forEach((n) => {
+          maxEnd = Math.max(maxEnd, n.start + n.duration)
+        })
+      }
+      state.project.tracks.push(track)
+    }
+    ensureBarsForBeat(maxEnd)
+    state.selectedTrackId = state.project.tracks[state.project.tracks.length - result.tracks.length]?.id ?? ''
+    state.selectedNoteIds = []
+    state.selectedClipId = ''
+    record(`导入 MIDI：${result.tracks.length} 条轨道`)
+    commit()
+    syncNow()
+    state.statusText = `已从 MIDI 导入 ${result.tracks.length} 条轨道`
+  } catch (error) {
+    state.statusText = `导入 MIDI 失败：${(error as Error).message}`
   }
 }
 

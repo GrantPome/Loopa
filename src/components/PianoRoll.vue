@@ -35,15 +35,51 @@ import {
   toggleNoteSelection,
   toggleVelocityLane
 } from '@/core/store'
-import { MAX_MIDI, MIN_MIDI, beatsPerBarOf, clamp, isBlackKey, midiToNoteName, roundBeat, snapTo } from '@/utils/music'
+import { MAX_MIDI, MIN_MIDI, beatsPerBarOf, clamp, floorToGrid, isBlackKey, midiToNoteName, roundBeat, snapTo } from '@/utils/music'
 import { midiToVelocity, velocityToMidi } from '@/utils/audio'
 import { hexToRgba } from '@/utils/color'
-import { KEY_WIDTH, SCROLLBAR_SIZE, VELOCITY_LANE_HEIGHT } from '@/utils/layout'
+import { KEY_WIDTH, NAV_HEIGHT, SCROLLBAR_SIZE, VELOCITY_LANE_HEIGHT } from '@/utils/layout'
 
 const bodyEl = ref<HTMLDivElement | null>(null)
 const gridEl = ref<HTMLCanvasElement | null>(null)
 const keysEl = ref<HTMLCanvasElement | null>(null)
 const velocityEl = ref<HTMLCanvasElement | null>(null)
+/** 底部缩略导航条：容器与画布 */
+const navHostEl = ref<HTMLDivElement | null>(null)
+const navCanvasEl = ref<HTMLCanvasElement | null>(null)
+
+// ---------------------------------------------------------------- 操作提示弹层（「?」图标）
+const hintOpen = ref(false)
+const hintHover = ref(false)
+const hintWrapEl = ref<HTMLDivElement | null>(null)
+const hintBtnEl = ref<HTMLButtonElement | null>(null)
+const hintPopEl = ref<HTMLDivElement | null>(null)
+/** 弹层在视口中的坐标（position: fixed） */
+const hintPos = ref({ x: 0, y: 0 })
+
+function toggleHint(): void {
+  hintOpen.value = !hintOpen.value
+}
+
+/**
+ * 计算提示弹层位置：默认右对齐按钮下方，
+ * 并用视口边界兜底裁剪，避免窄视口下被卷帘面板裁掉。
+ * 头部工具栏会换行，按钮不一定在最右侧，所以不能用纯 CSS 定位。
+ */
+function positionHint(): void {
+  const btn = hintBtnEl.value
+  if (!btn) return
+  const r = btn.getBoundingClientRect()
+  const w = hintPopEl.value?.offsetWidth ?? 190
+  const h = hintPopEl.value?.offsetHeight ?? 130
+  let x = r.right - w
+  let y = r.bottom + 4
+  if (x + w > window.innerWidth - 8) x = window.innerWidth - w - 8
+  if (x < 8) x = 8
+  // 下方放不下则翻到按钮上方
+  if (y + h > window.innerHeight - 8) y = Math.max(8, r.top - h - 4)
+  hintPos.value = { x, y }
+}
 
 /** 力度编辑条高度 */
 const LANE_H = VELOCITY_LANE_HEIGHT
@@ -71,6 +107,17 @@ let longPressOrigin = { x: 0, y: 0 }
 let longPressHitNote: Note | null = null
 /** 长按开始时已选中的音符 id 集合快照（用于恢复多选状态） */
 let longPressPrevSelection: string[] = []
+
+/**
+ * 判定「手指已移动」的容差（px）：
+ * 触屏抖动明显，容差过小会让长按判定被抖动取消，导致长按手势时有时无。
+ */
+const MOVE_TOLERANCE_MOUSE = 6
+const MOVE_TOLERANCE_TOUCH = 12
+/** 本次手势的容差，在 pointerdown 时按 pointerType 决定 */
+let moveTolerance = MOVE_TOLERANCE_MOUSE
+/** 当前手势的主指针 id：多指同时触摸时忽略其它手指，避免第二根手指打断或串改拖拽状态 */
+let activePointerId: number | null = null
 
 /** 右键 / 长按菜单 */
 const menuEl = ref<HTMLDivElement | null>(null)
@@ -107,6 +154,9 @@ function startLongPressTimer(x: number, y: number, hit: Note | null): void {
       openMenu(longPressOrigin.x, longPressOrigin.y, longPressHitNote)
     } else {
       // 长按空白 → 进入框选模式
+      // 触屏上浏览器可能在长按期间先抛出原生 contextmenu（走 onContextMenu 弹了菜单），
+      // 这里统一收起菜单，避免「一边框选一边挂着菜单」的冲突画面
+      closeMenu()
       drag.mode = 'marquee'
       drag.marquee = { x0: longPressOrigin.x, y0: longPressOrigin.y, x1: longPressOrigin.x, y1: longPressOrigin.y }
       clearNoteSelection()
@@ -115,11 +165,16 @@ function startLongPressTimer(x: number, y: number, hit: Note | null): void {
   }, longPressMs.value)
 }
 
-/** 在视口指定位置打开右键菜单 */
+/**
+ * 在指定位置打开右键 / 长按菜单。
+ * 传入的 localX/localY 是「画布本地坐标」（= 内容坐标，已含横向滚动量），
+ * 因此必须以画布的 rect 为原点换算成视口坐标；
+ * 若用 .pr-body 的 rect 作原点，横向滚动后菜单会整体偏移 scrollLeft。
+ */
 function openMenu(localX: number, localY: number, hitNote: Note | null): void {
-  const body = bodyEl.value
-  if (!body) return
-  const rect = body.getBoundingClientRect()
+  const canvas = gridEl.value
+  if (!canvas) return
+  const rect = canvas.getBoundingClientRect()
   menuPos.value = {
     x: rect.left + localX,
     y: rect.top + localY
@@ -206,11 +261,11 @@ function menuVelHumanize(): void {
   requestDraw()
 }
 
-/** 点击菜单外部关闭 */
+/** 点击菜单 / 提示弹层以外的区域时关闭 */
 function onMenuOutsidePointerDown(event: PointerEvent): void {
-  if (!menuEl.value) return
-  if (menuEl.value.contains(event.target as Node)) return
-  closeMenu()
+  const target = event.target as Node
+  if (menuEl.value && !menuEl.value.contains(target)) closeMenu()
+  if (hintWrapEl.value && !hintWrapEl.value.contains(target)) hintOpen.value = false
 }
 
 /** 视口顶部对应的 MIDI 音号（数值越大音越高，画布 y 越小） */
@@ -224,7 +279,17 @@ const totalBeats = computed(() => state.project.bars * beatsPerBarOf(state.proje
 const totalWidth = computed(() => Math.max(200, totalBeats.value * state.view.pxPerBeat))
 const noteCount = computed(() => region.value?.notes.length ?? 0)
 
-type DragMode = 'none' | 'create' | 'create-pending' | 'move' | 'move-pending' | 'resize-end' | 'resize-start' | 'marquee'
+type DragMode =
+  | 'none'
+  | 'create'
+  | 'create-pending'
+  | 'move'
+  | 'move-pending'
+  | 'resize-end'
+  | 'resize-start'
+  | 'marquee'
+  /** 空白处按下、等待手势定性的中间态：拖动 → 框选，原地抬起 → 新增音符 */
+  | 'marquee-pending'
 
 interface NoteSnapshot {
   id: string
@@ -524,6 +589,136 @@ function drawVelocity(): void {
   }
 }
 
+// ---------------------------------------------------------------- 横向缩略导航条
+
+/**
+ * 绘制底部缩略导航条：
+ * 把整首歌（totalWidth）压缩进容器宽度，缩略画出所有音符，
+ * 再叠一层半透明的「视口窗口」表示当前可见的横向范围。
+ * 导航条自身不滚动，因此每次整条重绘。
+ */
+function drawNav(): void {
+  const canvas = navCanvasEl.value
+  const host = navHostEl.value
+  const body = bodyEl.value
+  if (!canvas || !host || !body) return
+
+  const cssWidth = host.clientWidth
+  const cssHeight = host.clientHeight
+  const ctx = prepareCanvas(canvas, cssWidth, cssHeight)
+  if (!ctx) return
+  ctx.clearRect(0, 0, cssWidth, cssHeight)
+
+  ctx.fillStyle = '#111217'
+  ctx.fillRect(0, 0, cssWidth, cssHeight)
+
+  const total = totalWidth.value
+  if (total <= 0) return
+  /** 网格像素 → 导航像素 的缩放系数 */
+  const scale = cssWidth / total
+
+  // 小节分隔线，帮助快速定位
+  const bpb = beatsPerBarOf(state.project.timeSignature)
+  const px = state.view.pxPerBeat
+  for (let bar = 0; bar <= state.project.bars; bar += 1) {
+    const x = Math.round(bar * bpb * px * scale)
+    ctx.fillStyle = 'rgba(255,255,255,0.10)'
+    ctx.fillRect(x, 0, 1, cssHeight)
+  }
+
+  // 音符缩略：纵向把 MIN_MIDI~MAX_MIDI 压缩进导航条高度
+  const active = region.value
+  const pad = 2
+  const innerH = Math.max(1, cssHeight - pad * 2)
+  const midiSpan = MAX_MIDI - MIN_MIDI + 1
+  if (active && active.notes.length > 0) {
+    const color = trackColor.value
+    const noteH = Math.max(1.5, (innerH / midiSpan) * 2)
+    for (const note of active.notes) {
+      const x = note.start * px * scale
+      const w = Math.max(1.5, note.duration * px * scale)
+      const y = pad + ((MAX_MIDI - note.midi) / midiSpan) * innerH
+      ctx.globalAlpha = 0.4 + note.velocity * 0.5
+      ctx.fillStyle = color
+      ctx.fillRect(x, y, w, noteH)
+    }
+    ctx.globalAlpha = 1
+  }
+
+  // 视口窗口：当前网格可见的横向范围
+  const winX = body.scrollLeft * scale
+  const winW = Math.max(8, body.clientWidth * scale)
+  ctx.fillStyle = 'rgba(79,157,247,0.16)'
+  ctx.fillRect(winX, 0, winW, cssHeight)
+  ctx.strokeStyle = 'rgba(79,157,247,0.9)'
+  ctx.lineWidth = 1
+  ctx.strokeRect(Math.round(winX) + 0.5, 0.5, Math.max(8, Math.round(winW)) - 1, cssHeight - 1)
+}
+
+/** 导航条本地 x（相对画布左边缘） */
+function navLocalX(event: PointerEvent): number {
+  const host = navHostEl.value
+  if (!host) return 0
+  return event.clientX - host.getBoundingClientRect().left
+}
+
+/** 导航条拖拽状态：抓取点相对视口窗口左边缘的偏移 */
+const navDrag = { active: false, grabOffset: 0 }
+
+/** 把导航条位置换算成网格滚动位置（navX 为视口窗口左边缘在导航条上的 x） */
+function applyNavScroll(navX: number): void {
+  const body = bodyEl.value
+  const host = navHostEl.value
+  if (!body || !host) return
+  const total = totalWidth.value
+  if (total <= 0) return
+  const scale = host.clientWidth / total
+  const max = Math.max(0, body.scrollWidth - body.clientWidth)
+  body.scrollLeft = clamp(navX / scale, 0, max)
+  state.view.scrollLeft = body.scrollLeft
+  requestDraw()
+}
+
+function onNavPointerDown(event: PointerEvent): void {
+  if (event.button !== 0) return
+  const body = bodyEl.value
+  const host = navHostEl.value
+  if (!body || !host) return
+  const total = totalWidth.value
+  if (total <= 0) return
+
+  const scale = host.clientWidth / total
+  const x = navLocalX(event)
+  const winX = body.scrollLeft * scale
+  const winW = Math.max(8, body.clientWidth * scale)
+
+  if (x >= winX && x <= winX + winW) {
+    // 点在视口窗口内：保留抓取偏移，直接拖拽
+    navDrag.grabOffset = x - winX
+  } else {
+    // 点在窗口外：把视口中心移到点击处
+    navDrag.grabOffset = winW / 2
+    applyNavScroll(x - navDrag.grabOffset)
+  }
+  navDrag.active = true
+  window.addEventListener('pointermove', onNavPointerMove)
+  window.addEventListener('pointerup', onNavPointerUp)
+  window.addEventListener('pointercancel', onNavPointerUp)
+}
+
+function onNavPointerMove(event: PointerEvent): void {
+  if (!navDrag.active) return
+  applyNavScroll(navLocalX(event) - navDrag.grabOffset)
+}
+
+function onNavPointerUp(): void {
+  if (!navDrag.active) return
+  navDrag.active = false
+  window.removeEventListener('pointermove', onNavPointerMove)
+  window.removeEventListener('pointerup', onNavPointerUp)
+  window.removeEventListener('pointercancel', onNavPointerUp)
+}
+
 /** 力度条坐标 → 画布本地坐标 */
 function laneLocal(event: PointerEvent): { x: number; y: number } {
   const canvas = velocityEl.value
@@ -606,6 +801,7 @@ function onLanePointerDown(event: PointerEvent): void {
 
   window.addEventListener('pointermove', onLanePointerMove)
   window.addEventListener('pointerup', onLanePointerUp)
+  window.addEventListener('pointercancel', onLanePointerUp)
 }
 
 function onLanePointerMove(event: PointerEvent): void {
@@ -620,6 +816,7 @@ function onLanePointerUp(): void {
   laneReadout.value = null
   window.removeEventListener('pointermove', onLanePointerMove)
   window.removeEventListener('pointerup', onLanePointerUp)
+  window.removeEventListener('pointercancel', onLanePointerUp)
   commit()
   requestDraw()
 }
@@ -675,6 +872,7 @@ function loop(): void {
     drawGrid()
     drawKeys()
     if (state.velocityLaneOn) drawVelocity()
+    drawNav()
     dirty = false
   }
   rafId = requestAnimationFrame(loop)
@@ -732,6 +930,9 @@ function attachListeners(): void {
   listenersAttached = true
   window.addEventListener('pointermove', onPointerMove)
   window.addEventListener('pointerup', onPointerUp)
+  // 触屏上浏览器可能中途接管手势并发出 pointercancel，
+  // 若不当成抬起处理，拖拽状态会卡住、监听器残留
+  window.addEventListener('pointercancel', onPointerUp)
 }
 
 function detachListeners(): void {
@@ -739,11 +940,17 @@ function detachListeners(): void {
   listenersAttached = false
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', onPointerUp)
+  window.removeEventListener('pointercancel', onPointerUp)
 }
 
 function onPointerDown(event: PointerEvent): void {
   // 左键（0）正常交互；右键（2）由 onContextMenu 单独处理
   if (event.button !== 0) return
+  // 已有手势进行中：忽略其它手指的按下，避免多指触摸互相打断
+  if (activePointerId !== null && event.pointerId !== activePointerId) return
+  activePointerId = event.pointerId
+  // 触屏抖动大，用更大的移动容差，避免长按判定被手指抖动取消
+  moveTolerance = event.pointerType === 'touch' ? MOVE_TOLERANCE_TOUCH : MOVE_TOLERANCE_MOUSE
   const { x, y } = localPoint(event)
   const beat = x / state.view.pxPerBeat
   const midi = midiAtY(y)
@@ -786,11 +993,15 @@ function onPointerDown(event: PointerEvent): void {
     clearNoteSelection()
   } else {
     // 空白处按下：
-    //  - 先启动长按计时器（Pad 端长按 = 框选；PC 端也支持）
-    //  - 如果提前抬起（没到长按时长），则当作「新增音符」
+    //  - 启动长按计时器（长按 = 框选）
+    //  - 触屏 / Pad 模式：拖动 = 框选；鼠标 + PC 模式：拖动 = 新增音符并拉长
+    //  - 原地抬起（未拖动）= 新增一个默认时长的音符
     startLongPressTimer(x, y, null)
-    drag.mode = 'create-pending'
-    drag.originBeat = Math.max(0, snapTo(beat, state.snapDivision))
+    const touchLike = event.pointerType === 'touch' || state.deviceMode === 'pad'
+    drag.mode = touchLike ? 'marquee-pending' : 'create-pending'
+    // 以点击所在的整格为准（向下取整），而不是吸附到最近的网格线，
+    // 否则点在格子右半部分时音符会跑到右边那一格
+    drag.originBeat = Math.max(0, floorToGrid(beat, state.snapDivision))
     drag.originMidi = midi
   }
 
@@ -822,17 +1033,19 @@ function onContextMenu(event: MouseEvent): void {
 }
 
 function onPointerMove(event: PointerEvent): void {
+  // 忽略非主指针（多指触摸时的其它手指），避免串改当前拖拽
+  if (activePointerId !== null && event.pointerId !== activePointerId) return
   const { x, y } = localPoint(event)
+  const dx = Math.abs(x - longPressOrigin.x)
+  const dy = Math.abs(y - longPressOrigin.y)
+  const movedEnough = dx > moveTolerance || dy > moveTolerance
 
-  // 长按计时中：如果移动超过阈值，取消长按，当作普通拖拽
+  // 长按计时中：移动超过容差 → 取消长按，按手势定性进入拖拽
   if (longPressTimer !== null) {
-    const dx = Math.abs(x - longPressOrigin.x)
-    const dy = Math.abs(y - longPressOrigin.y)
-    // 移动超过 6px 视为用户在拖拽，取消长按
-    if (dx > 6 || dy > 6) {
+    if (movedEnough) {
       clearLongPressTimer()
-      // 如果是 create-pending（空白处按下后移动），转为「新增音符」模式
       if (drag.mode === 'create-pending') {
+        // PC：空白处拖动 = 新增音符并拉长
         const midi = drag.originMidi
         const start = drag.originBeat
         const note = addNote(midi, start, state.snapDivision)
@@ -843,14 +1056,29 @@ function onPointerMove(event: PointerEvent): void {
         } else {
           drag.mode = 'none'
         }
+      } else if (drag.mode === 'marquee-pending') {
+        // Pad：空白处拖动 = 框选
+        drag.mode = 'marquee'
+        drag.marquee = { x0: longPressOrigin.x, y0: longPressOrigin.y, x1: x, y1: y }
+        clearNoteSelection()
       } else if (drag.mode === 'move-pending') {
         // 音符上按下后移动 → 进入拖拽模式
         drag.mode = drag.pendingTarget
       }
     }
+  } else if (longPressTriggered && drag.mode === 'move-pending' && movedEnough) {
+    // 长按已触发（菜单已弹出）：手指继续移动 → 视为拖拽，
+    // 关闭菜单并转为移动 / 改时长，避免「长按后无法拖拽音符」
+    closeMenu()
+    drag.mode = drag.pendingTarget
   }
 
-  if (drag.mode === 'none' || drag.mode === 'create-pending' || drag.mode === 'move-pending') {
+  if (
+    drag.mode === 'none' ||
+    drag.mode === 'create-pending' ||
+    drag.mode === 'marquee-pending' ||
+    drag.mode === 'move-pending'
+  ) {
     updateCursor(event)
     return
   }
@@ -895,7 +1123,12 @@ function onPointerMove(event: PointerEvent): void {
   requestDraw()
 }
 
-function onPointerUp(): void {
+function onPointerUp(event?: PointerEvent): void {
+  // 非主指针抬起：忽略（多指触摸时其它手指的抬起不应结束当前手势）
+  if (event && activePointerId !== null && event.pointerId !== activePointerId) return
+  activePointerId = null
+  // 手势被浏览器 / 系统中断（pointercancel），而非用户主动抬起
+  const cancelled = event?.type === 'pointercancel'
   // 抬起时先清掉长按计时器
   clearLongPressTimer()
 
@@ -910,14 +1143,17 @@ function onPointerUp(): void {
     return
   }
 
-  // create-pending 抬起 = 快速点击空白 → 新增一个默认时长的音符
-  if (drag.mode === 'create-pending') {
-    const midi = drag.originMidi
-    const start = drag.originBeat
-    const note = addNote(midi, start, state.snapDivision)
-    if (note) {
-      setNoteSelection([note.id])
-      commit()
+  // create-pending / marquee-pending 抬起 = 原地点击空白 → 新增一个默认时长的音符
+  // 若手势是被系统中断（cancelled），则视为放弃，不新增音符
+  if (drag.mode === 'create-pending' || drag.mode === 'marquee-pending') {
+    if (!cancelled) {
+      const midi = drag.originMidi
+      const start = drag.originBeat
+      const note = addNote(midi, start, state.snapDivision)
+      if (note) {
+        setNoteSelection([note.id])
+        commit()
+      }
     }
     drag.mode = 'none'
     drag.marquee = null
@@ -940,34 +1176,54 @@ function onPointerUp(): void {
   }
 
   if (drag.mode === 'marquee' && drag.marquee) {
-    const active = region.value
-    if (active) {
-      const x0 = Math.min(drag.marquee.x0, drag.marquee.x1)
-      const x1 = Math.max(drag.marquee.x0, drag.marquee.x1)
-      const y0 = Math.min(drag.marquee.y0, drag.marquee.y1)
-      const y1 = Math.max(drag.marquee.y0, drag.marquee.y1)
-      const px = state.view.pxPerBeat
-      const rowH = rowHeight.value
-      const top = topMidi.value
-      const beatStart = x0 / px
-      const beatEnd = x1 / px
-      const midiHigh = top - Math.floor(y0 / rowH)
-      const midiLow = top - Math.floor(y1 / rowH)
-      setNoteSelection(
-        active.notes
-          .filter(
-            (n) =>
-              n.start + n.duration >= beatStart &&
-              n.start <= beatEnd &&
-              n.midi <= midiHigh &&
-              n.midi >= midiLow
-          )
-          .map((n) => n.id)
-      )
+    // 被系统中断的框选不生效，保留原有选中状态
+    if (!cancelled) {
+      const active = region.value
+      if (active) {
+        const x0 = Math.min(drag.marquee.x0, drag.marquee.x1)
+        const x1 = Math.max(drag.marquee.x0, drag.marquee.x1)
+        const y0 = Math.min(drag.marquee.y0, drag.marquee.y1)
+        const y1 = Math.max(drag.marquee.y0, drag.marquee.y1)
+        const px = state.view.pxPerBeat
+        const rowH = rowHeight.value
+        const top = topMidi.value
+        const beatStart = x0 / px
+        const beatEnd = x1 / px
+        const midiHigh = top - Math.floor(y0 / rowH)
+        const midiLow = top - Math.floor(y1 / rowH)
+        setNoteSelection(
+          active.notes
+            .filter(
+              (n) =>
+                n.start + n.duration >= beatStart &&
+                n.start <= beatEnd &&
+                n.midi <= midiHigh &&
+                n.midi >= midiLow
+            )
+            .map((n) => n.id)
+        )
+      }
     }
   } else if (drag.mode !== 'none') {
-    ensureBarsForBeat(maxNoteEnd())
-    commit()
+    if (cancelled) {
+      // 手势被系统中断：把音符回滚到按下前的快照，避免留下拖到一半的错位音符
+      const active = region.value
+      if (drag.mode === 'create') {
+        // 新增拖拽被打断 → 直接丢弃这个刚创建的音符
+        if (drag.snapshots[0]) removeNotes([drag.snapshots[0].id])
+      } else if (active) {
+        for (const snap of drag.snapshots) {
+          const note = active.notes.find((n) => n.id === snap.id)
+          if (!note) continue
+          note.start = snap.start
+          note.duration = snap.duration
+          note.midi = snap.midi
+        }
+      }
+    } else {
+      ensureBarsForBeat(maxNoteEnd())
+      commit()
+    }
   }
 
   longPressTriggered = false
@@ -1073,6 +1329,7 @@ onMounted(() => {
   }
   // 点击菜单外部关闭菜单
   window.addEventListener('pointerdown', onMenuOutsidePointerDown)
+  window.addEventListener('resize', onHintResize)
 })
 
 onBeforeUnmount(() => {
@@ -1080,9 +1337,24 @@ onBeforeUnmount(() => {
   detachListeners()
   window.removeEventListener('pointermove', onLanePointerMove)
   window.removeEventListener('pointerup', onLanePointerUp)
+  window.removeEventListener('pointercancel', onLanePointerUp)
+  window.removeEventListener('pointermove', onNavPointerMove)
+  window.removeEventListener('pointerup', onNavPointerUp)
+  window.removeEventListener('pointercancel', onNavPointerUp)
   window.removeEventListener('pointerdown', onMenuOutsidePointerDown)
+  window.removeEventListener('resize', onHintResize)
   clearLongPressTimer()
   resizeObserver?.disconnect()
+})
+
+/** 提示弹层开着时，窗口尺寸变化需重新定位 */
+function onHintResize(): void {
+  if (hintOpen.value || hintHover.value) positionHint()
+}
+
+// 提示弹层显示后测量尺寸并定位
+watch([hintOpen, hintHover], () => {
+  if (hintOpen.value || hintHover.value) nextTick(positionHint)
 })
 
 // 切换轨道时自动调整音高窗口（鼓组音区较低）
@@ -1159,13 +1431,47 @@ watch(
 
       <button title="缩小" @click="zoomBy(1 / 1.3)">－</button>
       <button title="放大" @click="zoomBy(1.3)">＋</button>
-      <span class="dim hint">
-        {{
-          state.deviceMode === 'pad'
-            ? '长按空白拖拽框选 · 长按音符弹菜单 · 双指缩放'
-            : '滚轮移动音高 · Shift+滚轮左右滚动 · Ctrl+滚轮缩放 · Shift+拖拽框选 · 右键菜单'
-        }}
-      </span>
+
+      <!-- 操作提示：收进「?」图标，悬停或点击时弹出，避免长文本挤压网格 -->
+      <div
+        ref="hintWrapEl"
+        class="hint-wrap"
+        @mouseenter="hintHover = true"
+        @mouseleave="hintHover = false"
+      >
+        <button
+          ref="hintBtnEl"
+          class="hint-btn"
+          :class="{ open: hintOpen || hintHover }"
+          title="操作提示"
+          @click="toggleHint"
+        >
+          ?
+        </button>
+        <div
+          v-if="hintOpen || hintHover"
+          ref="hintPopEl"
+          class="hint-pop"
+          :style="{ left: hintPos.x + 'px', top: hintPos.y + 'px' }"
+        >
+          <div class="hint-pop-title">操作提示</div>
+          <template v-if="state.deviceMode === 'pad'">
+            <div class="hint-line">拖动空白处框选</div>
+            <div class="hint-line">拖动音符移动 / 改时长</div>
+            <div class="hint-line">点按空白处新增音符</div>
+            <div class="hint-line">长按音符弹出菜单</div>
+            <div class="hint-line">长按后继续拖动 = 移动音符</div>
+            <div class="hint-line">横向滚动用底部导航条</div>
+          </template>
+          <template v-else>
+            <div class="hint-line">滚轮移动音高</div>
+            <div class="hint-line">Shift + 滚轮左右滚动</div>
+            <div class="hint-line">Ctrl + 滚轮缩放</div>
+            <div class="hint-line">Shift + 拖拽框选</div>
+            <div class="hint-line">右键菜单</div>
+          </template>
+        </div>
+      </div>
     </header>
 
     <div class="pr-main">
@@ -1230,6 +1536,14 @@ watch(
           </div>
         </div>
       </template>
+
+      <!-- 底部横向缩略导航条：缩略显示整首歌，拖动视口窗口快速定位 -->
+      <div class="pr-nav" :style="{ height: NAV_HEIGHT + 'px' }">
+        <div class="pr-nav-label" :style="{ width: KEY_WIDTH + 'px' }">导航</div>
+        <div ref="navHostEl" class="pr-nav-host" @pointerdown="onNavPointerDown">
+          <canvas ref="navCanvasEl" class="nav-canvas" />
+        </div>
+      </div>
     </div>
 
     <!-- 右键 / 长按菜单 -->
@@ -1273,6 +1587,7 @@ watch(
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-width: 0;
   min-height: 0;
   background: #1c1e24;
 }
@@ -1305,8 +1620,68 @@ watch(
   color: var(--text-dim);
 }
 
-.hint {
+/* ---- 操作提示：「?」图标 + 弹出层 ---- */
+.hint-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.hint-btn {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: 50%;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-dim);
+}
+
+.hint-btn.open {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 弹层位置由 JS 计算（position: fixed），用视口边界兜底，避免被卷帘面板裁切 */
+.hint-pop {
+  position: fixed;
+  z-index: 260;
+  min-width: 178px;
+  padding: 7px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  animation: hint-pop 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes hint-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.hint-pop-title {
+  margin-bottom: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.hint-line {
   font-size: 12px;
+  white-space: nowrap;
+  color: var(--text);
 }
 
 .gap {
@@ -1339,6 +1714,7 @@ watch(
   overflow: hidden;
   background: #141519;
   border-right: 1px solid var(--line);
+  touch-action: none;
 }
 
 .keys-canvas {
@@ -1346,6 +1722,7 @@ watch(
   width: 100%;
   height: 100%;
   cursor: pointer;
+  touch-action: none;
 }
 
 .pr-body {
@@ -1354,10 +1731,17 @@ watch(
   overflow-x: auto;
   overflow-y: hidden;
   position: relative;
+  /* 触屏关键：禁用浏览器原生手势接管。否则单指拖动会被当作滚动，
+     浏览器随即发出 pointercancel，长按框选 / 拖拽音符都会被中途打断。
+     横向滚动改由底部缩略导航条承担。 */
+  touch-action: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .grid-canvas {
   display: block;
+  touch-action: none;
 }
 
 /* 力度编辑条工具行 */
@@ -1413,6 +1797,7 @@ watch(
   min-width: 0;
   overflow: hidden;
   position: relative;
+  touch-action: none;
 }
 
 .lane-inner {
@@ -1426,6 +1811,46 @@ watch(
 .lane-canvas {
   display: block;
   cursor: ns-resize;
+}
+
+/* ---- 底部横向缩略导航条 ---- */
+.pr-nav {
+  display: flex;
+  flex: 0 0 auto;
+  border-top: 1px solid var(--line);
+  background: #14151a;
+}
+
+.pr-nav-label {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-right: 1px solid var(--line);
+}
+
+.pr-nav-host {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.pr-nav-host:active {
+  cursor: grabbing;
+}
+
+.nav-canvas {
+  /* 绝对定位：脱离文档流，避免画布固有尺寸（= 位图宽度 × DPR）反过来撑大
+     容器的 min-content，进而把整个卷帘面板顶宽 */
+  position: absolute;
+  inset: 0;
+  display: block;
 }
 
 /* 右键 / 长按菜单 */

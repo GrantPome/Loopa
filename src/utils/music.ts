@@ -35,15 +35,49 @@ export function uid(prefix = 'id'): string {
   return `${prefix}_${Date.now().toString(36)}_${uidSeed.toString(36)}`
 }
 
-/** 拍号 -> 每小节拍数 */
+/** 各拍号对应的小节拍数（拍的单位统一为四分音符） */
+const BEATS_PER_BAR: Record<TimeSignature, number> = {
+  '2/4': 2,
+  '3/4': 3,
+  '4/4': 4,
+  '5/4': 5,
+  '6/8': 3,
+  '7/8': 3.5,
+  '9/8': 4.5,
+  '12/8': 6
+}
+
+/** 拍号 -> 每小节拍数（四分音符为 1 拍；如 6/8 = 3、7/8 = 3.5） */
 export function beatsPerBarOf(ts: TimeSignature): number {
-  return ts === '3/4' ? 3 : 4
+  return BEATS_PER_BAR[ts] ?? 4
+}
+
+/** 拍号 -> [分子, 分母]，供 Tone.Transport.timeSignature 使用 */
+export function timeSignatureParts(ts: TimeSignature): [number, number] {
+  const [num, den] = ts.split('/')
+  return [Number(num), Number(den)]
+}
+
+/** 拍号分母（4 = 四分音符，8 = 八分音符），用于确定节拍器点击单位 */
+export function timeSignatureDenominator(ts: TimeSignature): number {
+  return Number(ts.split('/')[1]) || 4
 }
 
 /** 网格吸附：把数值吸附到最近的网格点 */
 export function snapTo(value: number, grid: number): number {
   if (grid <= 0) return value
   return Math.round(value / grid) * grid
+}
+
+/**
+ * 网格取整（向下）：返回数值所在「格子」的起点。
+ * 与 snapTo（吸附到最近网格线）不同，这里以点击位置所在的整格为准，
+ * 避免点在格子右半部分时被吸附到右边那条线，造成「判定偏右」的错觉。
+ */
+export function floorToGrid(value: number, grid: number): number {
+  if (grid <= 0) return value
+  // 加极小量修正浮点误差（如 0.75 / 0.25 可能算成 2.9999…）
+  return Math.floor(value / grid + 1e-9) * grid
 }
 
 /** 修正浮点误差，避免出现 0.30000000000000004 之类的小数 */
