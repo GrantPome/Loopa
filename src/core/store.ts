@@ -2019,10 +2019,20 @@ export function setInstrumentTab(tab: InstrumentManagerTab): void {
 /**
  * 试听一个音色：内置音色直接播放示范乐句，
  * 自定义音源按其采样播放（鼓组打一小段鼓点，旋律走分解和弦）。
+ * quick = true 时播放更短的乐句，供「依次试听全部音色」连播使用。
  */
-export async function previewInstrument(type: InstrumentType, customInstrumentId = ''): Promise<void> {
+export async function previewInstrument(
+  type: InstrumentType,
+  customInstrumentId = '',
+  quick = false
+): Promise<void> {
   await ensureAudio()
-  engine.previewVoice(type, state.project, customInstrumentId)
+  engine.previewVoice(type, state.project, customInstrumentId, quick)
+}
+
+/** 停止正在播放的试听声音（关闭管理器或中断连播时调用） */
+export function stopInstrumentPreview(): void {
+  engine.stopAudition()
 }
 
 /**

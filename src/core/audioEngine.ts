@@ -921,8 +921,9 @@ class AudioEngine {
    * 试听任意音色（供「乐器与音源」管理器使用）：
    * 临时构建一个乐器节点接到干声总线，播放一小段示范乐句后自动释放。
    * 内置音色直接构建；自定义音源按工程数据解析出已解码的采样。
+   * quick = true 时改用更短的示范乐句（供「依次试听全部音色」连播使用）。
    */
-  previewVoice(type: InstrumentType, project: Project, customInstrumentId = ''): void {
+  previewVoice(type: InstrumentType, project: Project, customInstrumentId = '', quick = false): void {
     if (!this.graphReady) return
     const custom =
       type === 'custom' ? this.resolveCustomInstrument(project, customInstrumentId) : null
@@ -938,25 +939,33 @@ class AudioEngine {
 
     const now = Tone.getContext().currentTime
     if (drum) {
-      // 一小段鼓点：底鼓 → 军鼓 → 闭合踩镲 → 开镲 → 吊镲（大擦）
-      const hits: [number, number][] = [
-        [36, 0],
-        [38, 0.3],
-        [42, 0.6],
-        [46, 0.85],
-        [49, 1.15]
-      ]
+      // 一小段鼓点：底鼓 → 军鼓 → 闭合踩镲（连播时只取前三个，缩短时长）
+      const hits: [number, number][] = quick
+        ? [
+            [36, 0],
+            [38, 0.22],
+            [42, 0.44]
+          ]
+        : [
+            [36, 0],
+            [38, 0.3],
+            [42, 0.6],
+            [46, 0.85],
+            [49, 1.15]
+          ]
       hits.forEach(([midi, offset]) => instrument.triggerAttackRelease(midi, 0.4, now + offset, 0.9))
     } else {
-      // 上行分解和弦：C4 E4 G4 C5，便于听清起音与延音
-      const notes = [60, 64, 67, 72]
+      // 上行分解和弦：完整模式 C4 E4 G4 C5，连播模式缩短为 C4 G4 C5
+      const notes = quick ? [60, 67, 72] : [60, 64, 67, 72]
+      const gap = quick ? 0.1 : 0.14
+      const duration = quick ? 0.5 : 0.75
       notes.forEach((midi, index) =>
-        instrument.triggerAttackRelease(midiToNoteName(midi), 0.75, now + index * 0.14, 0.85)
+        instrument.triggerAttackRelease(midiToNoteName(midi), duration, now + index * gap, 0.85)
       )
     }
 
     // 等乐句自然收尾后再释放临时节点，避免声音被硬切断
-    const lifetime = drum ? 2800 : 1900
+    const lifetime = drum ? (quick ? 1100 : 2800) : quick ? 900 : 1900
     const timer = window.setTimeout(() => {
       // 期间若已开始新的试听，这里不再重复释放
       if (this.audition?.timer !== timer) return

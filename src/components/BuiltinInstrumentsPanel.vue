@@ -3,13 +3,20 @@
  * 内置乐器面板（「乐器与音源」管理器的第一个页签）
  *
  * - 左侧按「旋律乐器 / 鼓组」分组列出全部内置音色，每项可单独试听
+ * - 顶部可一键「依次试听全部音色」，逐个播放并高亮当前正在响的音色
  * - 右侧展示所选音色的说明、试听按钮、鼓件映射与正在使用它的轨道
  * - 支持把音色一键应用到当前选中的 MIDI 轨道
  */
 import { computed, onBeforeUnmount, ref } from 'vue'
 import type { InstrumentType } from '@/types'
 import { GM_DRUM_NOTES, INSTRUMENT_LABELS } from '@/types'
-import { applyInstrumentToActiveTrack, previewInstrument, selectTrack, state } from '@/core/store'
+import {
+  applyInstrumentToActiveTrack,
+  previewInstrument,
+  selectTrack,
+  state,
+  stopInstrumentPreview
+} from '@/core/store'
 
 /** 旋律类音色（与 types 中的 INSTRUMENT_OPTIONS 顺序一致） */
 const MELODIC_TYPES: InstrumentType[] = [
@@ -79,6 +86,8 @@ let auditionTimer = 0
 
 /** 试听指定音色；试听期间按钮显示为播放中 */
 async function onPreview(type: InstrumentType = selected.value): Promise<void> {
+  // 单条试听会中断可能正在进行的「全部试听」连播
+  stopPreviewAll()
   auditioning.value = type
   await previewInstrument(type)
   window.clearTimeout(auditionTimer)
@@ -87,7 +96,60 @@ async function onPreview(type: InstrumentType = selected.value): Promise<void> {
   }, 2200)
 }
 
-onBeforeUnmount(() => window.clearTimeout(auditionTimer))
+// ------------------------------------------------- 依次试听全部音色
+
+/** 连播顺序：旋律乐器在前、鼓组在后 */
+const ALL_TYPES: InstrumentType[] = [...MELODIC_TYPES, ...DRUM_TYPES]
+
+/** 是否正在连播全部音色 */
+const playingAll = ref(false)
+/**
+ * 连播代号：每次开始或中断都自增。
+ * 循环里的每一轮都比对代号，不一致就立刻退出，避免中断后仍在后台继续播。
+ */
+let allRun = 0
+
+/** 等待一段时间（连播时用来控制每条示范乐句的间隔） */
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+/** 中断连播：停止循环并收掉正在响的试听声音 */
+function stopPreviewAll(): void {
+  allRun += 1
+  playingAll.value = false
+  auditioning.value = null
+  window.clearTimeout(auditionTimer)
+  stopInstrumentPreview()
+}
+
+/** 依次试听全部内置音色；连播中再次点击即中断 */
+async function onPreviewAll(): Promise<void> {
+  if (playingAll.value) {
+    stopPreviewAll()
+    return
+  }
+  playingAll.value = true
+  const run = ++allRun
+  for (const type of ALL_TYPES) {
+    if (run !== allRun) return
+    // 切到该音色，右侧详情随动，用户能实时看到正在试听哪一个
+    selected.value = type
+    auditioning.value = type
+    await previewInstrument(type, '', true)
+    // 等短乐句播完再切下一个（鼓组尾巴更长，留多一点时间）
+    await wait(DRUM_TYPES.includes(type) ? 1250 : 1050)
+  }
+  if (run === allRun) {
+    playingAll.value = false
+    auditioning.value = null
+  }
+}
+
+onBeforeUnmount(() => {
+  window.clearTimeout(auditionTimer)
+  stopPreviewAll()
+})
 
 /** 把当前音色应用到选中的 MIDI 轨道 */
 function onApply(): void {
@@ -105,6 +167,16 @@ function onJumpTrack(id: string): void {
   <div class="panel">
     <!-- 左：按分组列出全部内置音色 -->
     <aside class="list-col">
+      <div class="list-head">
+        <button
+          class="all-btn"
+          :class="{ playing: playingAll }"
+          :title="playingAll ? '停止依次试听' : '从钢琴开始，依次试听全部内置音色'"
+          @click="onPreviewAll"
+        >
+          {{ playingAll ? '■ 停止连播' : '▶ 试听全部音色' }}
+        </button>
+      </div>
       <div class="list">
         <div v-for="group in GROUPS" :key="group.id" class="group">
           <div class="group-title">{{ group.label }}</div>
@@ -207,6 +279,28 @@ function onJumpTrack(id: string): void {
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--line);
+}
+
+.list-head {
+  flex: 0 0 auto;
+  padding: 8px 8px 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* 「依次试听全部音色」按钮：连播中显示为激活态 */
+.all-btn {
+  width: 100%;
+  font-size: 12px;
+  padding: 5px 0;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.all-btn.playing {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0d1117;
+  font-weight: 600;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .list {
