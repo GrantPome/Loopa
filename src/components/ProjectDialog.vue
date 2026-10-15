@@ -13,6 +13,10 @@ function onLoad(id: string): void {
 }
 
 function onDelete(id: string): void {
+  const target = state.savedProjects.find((p) => p.id === id)
+  const name = target?.name ?? '未命名工程'
+  // 删除前二次确认，避免误触
+  if (!window.confirm(`确定要删除工程「${name}」吗？此操作无法撤销。`)) return
   deleteSavedProject(id)
 }
 
