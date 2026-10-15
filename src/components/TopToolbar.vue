@@ -91,7 +91,8 @@ const menus = computed<MenuDef[]>(() => [
       { label: '保存', desc: '保存到浏览器本地存储', action: saveProjectNow },
       { label: '导入工程 JSON', desc: '从 .json 文件载入工程', action: () => jsonInput.value?.click() },
       { label: '导入 MIDI', desc: '把 .mid 文件追加为新轨道', action: () => midiInput.value?.click() },
-      { label: '历史工程', desc: '查看并切换已保存的工程', action: () => emit('open-history') }
+      { label: '历史工程', desc: '查看并切换已保存的工程', action: () => emit('open-history') },
+      { label: '返回主页', desc: '回到欢迎主页', action: () => emit('open-home') }
     ]
   },
   {
@@ -232,7 +233,6 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-      <button title="返回主页" @click="emit('open-home')">⌂</button>
       <button title="设置" @click="openSettings">⚙</button>
       <input ref="jsonInput" type="file" accept="application/json,.json" class="hidden-file" @change="onJsonChange" />
       <input ref="midiInput" type="file" accept="audio/midi,.mid,.midi" class="hidden-file" @change="onMidiChange" />
