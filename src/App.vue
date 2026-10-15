@@ -8,6 +8,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import TopToolbar from './components/TopToolbar.vue'
 import DockNode from './components/DockNode.vue'
+import HomePage from './components/HomePage.vue'
 import ProjectDialog from './components/ProjectDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import InstrumentDialog from './components/InstrumentDialog.vue'
@@ -17,6 +18,7 @@ import {
   clearNoteSelection,
   deleteSelectedNotes,
   ensureAudio,
+  newProject,
   nudgeSelectedVelocity,
   redo,
   removeClip,
@@ -26,7 +28,20 @@ import {
   undo
 } from '@/core/store'
 
+/** 主页（欢迎页）开关：首次打开站点时先展示主页 */
+const homeOpen = ref(true)
 const historyOpen = ref(false)
+
+/** 主页「新建工程」：新建后直接进入编辑器 */
+function onNewProject(): void {
+  newProject()
+  homeOpen.value = false
+}
+
+/** 主页「历史工程」：打开历史工程对话框 */
+function onOpenHistory(): void {
+  historyOpen.value = true
+}
 
 /** 插入预览（视口坐标，position: fixed 直接使用） */
 const dropPreviewStyle = computed(() => {
@@ -49,6 +64,9 @@ function onFirstGesture(): void {
 }
 
 function onKeyDown(event: KeyboardEvent): void {
+  // 主页上不响应编辑器快捷键
+  if (homeOpen.value) return
+
   const target = event.target as HTMLElement | null
   // 在输入框里打字时不触发快捷键
   if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return
@@ -121,24 +139,34 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app" :class="{ editing: layoutUi.editMode }">
-    <TopToolbar @open-history="historyOpen = true" />
+    <!-- 主页（欢迎页）：进入编辑器后不再展示 -->
+    <HomePage
+      v-if="homeOpen"
+      @enter="homeOpen = false"
+      @new="onNewProject"
+      @history="onOpenHistory"
+    />
 
-    <!-- 布局编辑模式提示条 -->
-    <div v-if="layoutUi.editMode" class="edit-banner">
-      <span class="dot" />
-      <strong>布局编辑模式</strong>
-      <span class="hint">功能已锁定；拖动板块标题栏到目标板块的上 / 下 / 左 / 右边缘即可插入</span>
-      <span class="spacer" />
-      <button @click="resetLayout">恢复默认</button>
-      <button class="primary" @click="setEditMode(false)">完成</button>
-    </div>
+    <template v-else>
+      <TopToolbar @open-history="historyOpen = true" @open-home="homeOpen = true" />
 
-    <div class="app-body">
-      <DockNode class="dock-root" :node="layout.root" />
-    </div>
+      <!-- 布局编辑模式提示条 -->
+      <div v-if="layoutUi.editMode" class="edit-banner">
+        <span class="dot" />
+        <strong>布局编辑模式</strong>
+        <span class="hint">功能已锁定；拖动板块标题栏到目标板块的上 / 下 / 左 / 右边缘即可插入</span>
+        <span class="spacer" />
+        <button @click="resetLayout">恢复默认</button>
+        <button class="primary" @click="setEditMode(false)">完成</button>
+      </div>
 
-    <!-- 插入预览：高亮目标板块的对应半边，直观表达插入后的占位 -->
-    <div v-if="layoutUi.dropRect" class="drop-preview" :style="dropPreviewStyle" />
+      <div class="app-body">
+        <DockNode class="dock-root" :node="layout.root" />
+      </div>
+
+      <!-- 插入预览：高亮目标板块的对应半边，直观表达插入后的占位 -->
+      <div v-if="layoutUi.dropRect" class="drop-preview" :style="dropPreviewStyle" />
+    </template>
 
     <ProjectDialog :open="historyOpen" @close="historyOpen = false" />
     <Transition name="mask-fade">

@@ -35,7 +35,7 @@ import { layoutUi } from '@/core/layout'
 import { useSegThumb } from '@/core/segThumb'
 import { beatsPerBarOf, formatPosition } from '@/utils/music'
 
-const emit = defineEmits<{ (e: 'open-history'): void }>()
+const emit = defineEmits<{ (e: 'open-history'): void; (e: 'open-home'): void }>()
 
 const jsonInput = ref<HTMLInputElement | null>(null)
 const midiInput = ref<HTMLInputElement | null>(null)
@@ -232,6 +232,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
+      <button title="返回主页" @click="emit('open-home')">⌂</button>
       <button title="设置" @click="openSettings">⚙</button>
       <input ref="jsonInput" type="file" accept="application/json,.json" class="hidden-file" @change="onJsonChange" />
       <input ref="midiInput" type="file" accept="audio/midi,.mid,.midi" class="hidden-file" @change="onMidiChange" />
