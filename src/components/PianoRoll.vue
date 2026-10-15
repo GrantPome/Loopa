@@ -653,6 +653,16 @@ function drawVelocity(): void {
     ctx.fill()
     ctx.globalAlpha = 1
   }
+
+  // 拖动力度条时画一条贯穿视口的水平参考线：
+  // 线高与被抓取柱子的顶面对齐，方便和其它柱子比高度
+  if (laneDrag.active) {
+    const lineY = Math.round(cssHeight - 2 - laneDrag.value * (cssHeight - 6))
+    ctx.fillStyle = 'rgba(79, 157, 247, 0.28)'
+    ctx.fillRect(0, lineY - 1, cssWidth, 3)
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
+    ctx.fillRect(0, lineY, cssWidth, 1)
+  }
 }
 
 // ---------------------------------------------------------------- 横向缩略导航条
@@ -964,8 +974,10 @@ function laneHitTest(x: number): Note | null {
 const laneDrag: {
   active: boolean
   grabVelocity: number
+  /** 抓取柱子当前的力度（0~1），拖拽期间据此绘制水平参考线 */
+  value: number
   base: Map<string, number>
-} = { active: false, grabVelocity: 0, base: new Map() }
+} = { active: false, grabVelocity: 0, value: 0, base: new Map() }
 
 function applyLaneVelocity(y: number): void {
   const value = laneValueAtY(y)
@@ -975,7 +987,9 @@ function applyLaneVelocity(y: number): void {
     entries.push({ id, velocity: base + delta })
   }
   applyNoteVelocities(entries)
-  laneReadout.value = velocityToMidi(clamp(laneDrag.grabVelocity + delta, 0, 1))
+  // 参考线基准：始终跟随被抓取的那根柱子（多选时其余柱子按同一增量平移）
+  laneDrag.value = clamp(laneDrag.grabVelocity + delta, 0, 1)
+  laneReadout.value = velocityToMidi(laneDrag.value)
   requestDraw()
 }
 
