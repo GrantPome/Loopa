@@ -15,12 +15,73 @@ import { deleteSavedProject, loadProjectById, state } from '@/core/store'
 
 const emit = defineEmits<{ (e: 'enter'): void; (e: 'new'): void; (e: 'history'): void }>()
 
-/** 右侧主内容区视图：主页插画 / 最近项目列表 */
-type HomeView = 'home' | 'projects'
+/** 右侧主内容区视图：主页插画 / 最近项目列表 / 关于与更新日志 */
+type HomeView = 'home' | 'projects' | 'about'
 const view = ref<HomeView>('home')
 
 /** 左侧列表项：团队项目暂未开放，仅作占位展示 */
 const comingSoonItems = ['新建团队项目', '打开团队项目']
+
+/**
+ * 更新日志：按发布日期倒序，内容整理自真实提交历史
+ */
+const changelog: { date: string; title: string; items: string[] }[] = [
+  {
+    date: '2026-10-15',
+    title: '主页与界面布局',
+    items: [
+      '新增 Premiere Pro 风格启动欢迎页，打开项目直接在右栏显示最近工程',
+      '界面布局改为可嵌套分割树，任意板块可插入到其他板块的上下左右',
+      '音符检查器拆分为独立可编排板块'
+    ]
+  },
+  {
+    date: '2026-10-15',
+    title: '钢琴卷帘体验优化',
+    items: [
+      '新增自绘横向与竖向滚动条，底部缩略导航条快速定位',
+      '琴键列支持按住滑奏，修复点击后音符不释放的问题',
+      '工具栏按语义分组收纳，显示与音阶折叠为下拉菜单',
+      '拖动力度条时显示贯穿视口的水平参考线'
+    ]
+  },
+  {
+    date: '2026-10-15',
+    title: '自动化、编组与音阶',
+    items: [
+      '自动化包络：音量 / 声像 / 混响发送曲线编辑，实时与导出听感一致',
+      '轨道编组 / Bus：父子层级结构与环检测',
+      '侧链压缩：包络跟随闪避，实时与离线导出统一',
+      '音阶锁定：创建与拖拽自动吸附，支持一键量化'
+    ]
+  },
+  {
+    date: '2026-10-14',
+    title: '自定义音源与乐器管理',
+    items: [
+      '自定义音源：导入采样拼装旋律 / 鼓组音源，采样存 IndexedDB',
+      '乐器与音源管理器窗口，内置音色支持依次试听全部采样',
+      '替换 TonePome 品牌 LOGO，新增全局弹窗过渡动画'
+    ]
+  },
+  {
+    date: '2026-10-14',
+    title: '录音与音频轨',
+    items: [
+      '录音、音频轨波形编辑、MIDI 导入导出',
+      '效果器链、撤销重做、布局编辑模式',
+      '移动端触控手势修复'
+    ]
+  },
+  {
+    date: '2026-10-13',
+    title: '首个版本',
+    items: [
+      '网页版库乐队 MVP：钢琴卷帘编曲、13 种音色、完整混音台',
+      '力度编辑体系与专业音符编辑，PC / Pad 多端适配'
+    ]
+  }
+]
 
 /** 占位项点击：仅提示，不触发任何跳转 */
 function onComingSoon(): void {
@@ -87,10 +148,19 @@ function formatTime(timestamp: number): string {
             {{ item }}
           </button>
         </nav>
+
+        <!-- 最底下：关于（基本信息 + 更新日志） -->
+        <button
+          class="menu-item about-entry"
+          :class="{ active: view === 'about' }"
+          @click="view = 'about'"
+        >
+          关于
+        </button>
       </aside>
 
-      <!-- 右侧主内容区（打开项目视图时改为从顶部向下排布） -->
-      <main class="main" :class="{ projects: view === 'projects' }">
+      <!-- 右侧主内容区（列表类视图从顶部向下排布） -->
+      <main class="main" :class="{ 'top-align': view !== 'home' }">
         <!-- 主页：欢迎插画 -->
         <template v-if="view === 'home'">
           <h1 class="title">欢迎使用 TonePome</h1>
@@ -124,7 +194,7 @@ function formatTime(timestamp: number): string {
         </template>
 
         <!-- 打开项目：最近项目列表 -->
-        <template v-else>
+        <template v-else-if="view === 'projects'">
           <h1 class="title">打开项目</h1>
 
           <div class="project-list">
@@ -154,6 +224,42 @@ function formatTime(timestamp: number): string {
             </div>
 
             <p v-if="!state.savedProjects.length" class="empty">还没有保存过的工程</p>
+          </div>
+        </template>
+
+        <!-- 关于：基本信息 + 更新日志 -->
+        <template v-else>
+          <h1 class="title">关于</h1>
+
+          <div class="about">
+            <!-- 基本信息 -->
+            <section class="about-info">
+              <div class="about-brand">TonePome</div>
+              <p class="about-desc">
+                网页版在线音乐编辑器（DAW）：钢琴卷帘编曲、音频轨与效果器、混音台，
+                支持 MIDI 导入导出与 WAV 离线导出。纯前端实现，工程数据保存在本地浏览器中。
+              </p>
+              <p class="about-meta">Vue 3 · TypeScript · Tone.js · Canvas</p>
+              <p class="about-meta">
+                <a class="about-link" href="https://github.com/GrantPome/TonePome" target="_blank" rel="noopener">
+                  github.com/GrantPome/TonePome
+                </a>
+              </p>
+            </section>
+
+            <!-- 更新日志 -->
+            <section class="about-changelog">
+              <h2 class="changelog-heading">更新日志</h2>
+              <div v-for="entry in changelog" :key="entry.date + entry.title" class="changelog-entry">
+                <div class="changelog-head">
+                  <span class="changelog-date">{{ entry.date }}</span>
+                  <span class="changelog-title">{{ entry.title }}</span>
+                </div>
+                <ul class="changelog-items">
+                  <li v-for="item in entry.items" :key="item">{{ item }}</li>
+                </ul>
+              </div>
+            </section>
           </div>
         </template>
       </main>
@@ -265,6 +371,17 @@ function formatTime(timestamp: number): string {
   background: var(--panel-3);
 }
 
+/* 当前视图对应的列表项高亮（如「关于」） */
+.menu-item.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* 「关于」入口：固定在左栏最底下 */
+.about-entry {
+  margin-top: auto;
+}
+
 /* ---------------------------------------------------------------- 右侧主内容区 */
 
 .main {
@@ -280,8 +397,8 @@ function formatTime(timestamp: number): string {
   overflow-y: auto;
 }
 
-/* 打开项目视图：列表从标题下方开始，自上而下排布，不垂直居中 */
-.main.projects {
+/* 列表类视图（打开项目 / 关于）：内容从标题下方开始，自上而下排布 */
+.main.top-align {
   justify-content: flex-start;
 }
 
@@ -386,6 +503,102 @@ function formatTime(timestamp: number): string {
   padding: 40px 20px;
 }
 
+/* ---------------------------------------------------------------- 关于页 */
+
+.about {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  margin-top: 56px;
+}
+
+.about-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.about-brand {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.about-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: var(--text-dim);
+}
+
+.about-meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.about-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.about-link:hover {
+  text-decoration: underline;
+}
+
+.changelog-heading {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.changelog-entry {
+  padding: 10px 0 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.changelog-entry:last-child {
+  border-bottom: none;
+}
+
+.changelog-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.changelog-date {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+.changelog-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.changelog-items {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.changelog-items li {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+
 /* ---------------------------------------------------------------- 移动端适配 */
 
 @media (max-width: 720px) {
@@ -443,6 +656,10 @@ function formatTime(timestamp: number): string {
   }
 
   .project-list {
+    margin-top: 24px;
+  }
+
+  .about {
     margin-top: 24px;
   }
 }
