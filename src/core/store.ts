@@ -460,6 +460,76 @@ function normalizeScale(raw: unknown): ScaleSetting {
   return { root: clamp(Math.round(Number(item?.root ?? 48) || 48), 48, 59), type }
 }
 
+// ---------------------------------------------------------------- 界面偏好持久化
+// 这些设置与工程数据无关，但用户手动切换后应当跨会话保持，
+// 因此单独存一份，避免刷新后被重置回默认值（例如设备模式、音量读数单位）。
+
+const UI_PREFS_KEY = 'muisc-editor:v1:ui'
+
+/** 需要跨会话保持的界面偏好 */
+interface UiPrefs {
+  deviceMode: DeviceMode
+  longPressDuration: number
+  touchKeyboardAlwaysOn: boolean
+  volumeDisplay: VolumeDisplay
+  velocityLaneOn: boolean
+  noteColorByVelocity: boolean
+}
+
+/** 默认界面偏好：与 AppState 的初始值保持一致 */
+function defaultUiPrefs(): UiPrefs {
+  return {
+    deviceMode: 'pc',
+    longPressDuration: 450,
+    touchKeyboardAlwaysOn: true,
+    volumeDisplay: 'db',
+    velocityLaneOn: true,
+    noteColorByVelocity: false
+  }
+}
+
+/** 读取界面偏好：缺字段或数据损坏时逐项回退默认值 */
+function readUiPrefs(): UiPrefs {
+  const base = defaultUiPrefs()
+  try {
+    const raw = localStorage.getItem(UI_PREFS_KEY)
+    if (!raw) return base
+    const parsed = JSON.parse(raw) as Partial<UiPrefs>
+    return {
+      deviceMode: parsed.deviceMode === 'pad' ? 'pad' : 'pc',
+      longPressDuration: clamp(Number(parsed.longPressDuration) || base.longPressDuration, 150, 2000),
+      touchKeyboardAlwaysOn: parsed.touchKeyboardAlwaysOn !== false,
+      volumeDisplay: parsed.volumeDisplay === 'linear' ? 'linear' : 'db',
+      velocityLaneOn: parsed.velocityLaneOn !== false,
+      noteColorByVelocity: parsed.noteColorByVelocity === true
+    }
+  } catch {
+    return base
+  }
+}
+
+/** 写入界面偏好（存储异常不影响功能） */
+function writeUiPrefs(): void {
+  try {
+    localStorage.setItem(
+      UI_PREFS_KEY,
+      JSON.stringify({
+        deviceMode: state.deviceMode,
+        longPressDuration: state.longPressDuration,
+        touchKeyboardAlwaysOn: state.touchKeyboardAlwaysOn,
+        volumeDisplay: state.volumeDisplay,
+        velocityLaneOn: state.velocityLaneOn,
+        noteColorByVelocity: state.noteColorByVelocity
+      } as UiPrefs)
+    )
+  } catch {
+    // 忽略存储配额异常，偏好丢失不影响功能
+  }
+}
+
+/** 启动时读取到的界面偏好，用于初始化 state */
+const initialUiPrefs = readUiPrefs()
+
 // ---------------------------------------------------------------- 全局状态
 
 export const state = reactive<AppState>({
@@ -479,19 +549,19 @@ export const state = reactive<AppState>({
   loopOn: true,
   activePitches: [],
   viewMode: 'piano',
-  velocityLaneOn: true,
+  velocityLaneOn: initialUiPrefs.velocityLaneOn,
   automationLaneOn: false,
   automationParam: 'volume',
   scaleLockOn: false,
-  noteColorByVelocity: false,
+  noteColorByVelocity: initialUiPrefs.noteColorByVelocity,
   keyboardVelocity: 0.85,
-  volumeDisplay: 'db',
-  deviceMode: 'pc',
+  volumeDisplay: initialUiPrefs.volumeDisplay,
+  deviceMode: initialUiPrefs.deviceMode,
   settingsOpen: false,
   instrumentOpen: false,
   instrumentTab: 'builtin',
-  longPressDuration: 450,
-  touchKeyboardAlwaysOn: true,
+  longPressDuration: initialUiPrefs.longPressDuration,
+  touchKeyboardAlwaysOn: initialUiPrefs.touchKeyboardAlwaysOn,
   levels: {},
   masterLevel: 0,
   limiting: false,
@@ -518,6 +588,10 @@ export function initStore(): void {
   }
   state.selectedTrackId = state.project.tracks[0]?.id ?? ''
   state.savedProjects = storage.readMetas()
+
+  // 设备模式等界面偏好已在 state 初始化时从 localStorage 恢复，
+  // 这里补跑一次联动效果（如 Pad 模式的行高放大），保证刷新后观感与切换时一致。
+  applyDeviceModeEffects()
 
   // 播放触发音符时，高亮虚拟键盘上对应的琴键（仅当前选中轨道）
   engine.onNoteOn = (midi, trackId) => {
@@ -2103,11 +2177,13 @@ export function setViewMode(mode: ViewMode): void {
 /** 展开 / 收起钢琴卷帘底部的力度编辑条 */
 export function toggleVelocityLane(): void {
   state.velocityLaneOn = !state.velocityLaneOn
+  writeUiPrefs()
 }
 
 /** 切换「按力度着色」显示 */
 export function toggleNoteColor(): void {
   state.noteColorByVelocity = !state.noteColorByVelocity
+  writeUiPrefs()
 }
 
 /** 切换底部自动化包络编辑条 */
@@ -2129,13 +2205,20 @@ export function setKeyboardVelocity(velocity: number): void {
 /** 切换音量读数单位：dB ↔ 线性百分比（全局生效，仅影响显示） */
 export function toggleVolumeDisplay(): void {
   state.volumeDisplay = state.volumeDisplay === 'db' ? 'linear' : 'db'
+  writeUiPrefs()
+}
+
+/** 设备模式的联动效果（切换与启动恢复共用，保证刷新后观感一致） */
+function applyDeviceModeEffects(): void {
+  // Pad 模式下自动加大行高，方便手指点击
+  if (state.deviceMode === 'pad' && state.view.rowHeight < 20) state.view.rowHeight = 22
 }
 
 /** 切换设备模式（pc / pad），切换后整体布局与交互方式都会调整 */
 export function setDeviceMode(mode: DeviceMode): void {
   state.deviceMode = mode
-  // Pad 模式下自动加大行高，方便手指点击
-  if (mode === 'pad' && state.view.rowHeight < 20) state.view.rowHeight = 22
+  applyDeviceModeEffects()
+  writeUiPrefs()
 }
 
 /** 打开设置对话框 */
@@ -2151,11 +2234,13 @@ export function closeSettings(): void {
 /** 设置长按触发时长（ms），仅在 Pad 模式下用于框选和右键菜单 */
 export function setLongPressDuration(ms: number): void {
   state.longPressDuration = Math.max(150, Math.min(2000, ms))
+  writeUiPrefs()
 }
 
 /** 切换 Pad 端虚拟键盘是否常驻显示 */
 export function toggleTouchKeyboardAlwaysOn(): void {
   state.touchKeyboardAlwaysOn = !state.touchKeyboardAlwaysOn
+  writeUiPrefs()
 }
 
 export function toggleMetronome(): void {
