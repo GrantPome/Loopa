@@ -48,6 +48,18 @@ body {
   font-size: 13px;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+  /* 界面文案统一禁止选中：拖拽音符、调滑块、拖板块时不会误选到一大片文字 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 输入类控件恢复选中能力，保证正常编辑、框选与复制粘贴 */
+input,
+textarea,
+select,
+[contenteditable='true'] {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* 统一键盘焦点样式：只在键盘导航时出现，鼠标点击不打扰 */
