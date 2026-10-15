@@ -1,24 +1,17 @@
 <script setup lang="ts">
 /**
- * 应用外壳：可编排的三区域布局
- * - 左栏 / 中央主区 / 底部栏 三个区域，各自按顺序排列功能板块
- * - 设置页可进入「布局编辑模式」，拖拽板块排序或跨区域互换
- * - 区域尺寸（左栏宽、底部高）通过拖拽分隔条调整
+ * 应用外壳：可任意编排的布局树
+ * - 界面由 src/core/layout.ts 中的布局树（板块 + 分割容器）递归渲染
+ * - 设置页可进入「布局编辑模式」，把任意板块拖到其它板块的上 / 下 / 左 / 右插入
+ * - 板块之间的分隔条可拖拽调整占比，窗口缩放时按占比等比自适应
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import TopToolbar from './components/TopToolbar.vue'
-import DockRegion from './components/DockRegion.vue'
+import DockNode from './components/DockNode.vue'
 import ProjectDialog from './components/ProjectDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import InstrumentDialog from './components/InstrumentDialog.vue'
-import {
-  layout,
-  layoutUi,
-  resetLayout,
-  setBottomHeight,
-  setEditMode,
-  setLeftWidth
-} from './core/layout'
+import { layout, layoutUi, resetLayout, setEditMode } from '@/core/layout'
 import {
   activeTrack,
   clearNoteSelection,
@@ -31,9 +24,21 @@ import {
   togglePlay,
   transposeSelectedNotes,
   undo
-} from './core/store'
+} from '@/core/store'
 
 const historyOpen = ref(false)
+
+/** 插入预览（视口坐标，position: fixed 直接使用） */
+const dropPreviewStyle = computed(() => {
+  const rect = layoutUi.dropRect
+  if (!rect) return undefined
+  return {
+    left: `${rect.left}px`,
+    top: `${rect.top}px`,
+    width: `${rect.width}px`,
+    height: `${rect.height}px`
+  }
+})
 
 /**
  * WebAudio 规则：音频上下文必须在用户手势之后初始化，
@@ -48,14 +53,15 @@ function onKeyDown(event: KeyboardEvent): void {
   // 在输入框里打字时不触发快捷键
   if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return
 
-  // 编辑模式优先：Esc 先退出布局编辑
+  // 编辑模式优先：Esc 先取消拖拽 / 退出布局编辑
   if (event.key === 'Escape' && layoutUi.editMode) {
     event.preventDefault()
+    if (layoutUi.dragPanel) return // 拖拽中的 Esc 由拖拽逻辑自身处理
     setEditMode(false)
     return
   }
 
-  // 布局编辑模式下锁定其余全部功能快捷键（撤销/重做、播放、删除、移调等），只能拖拽排序
+  // 布局编辑模式下锁定其余全部功能快捷键（撤销/重做、播放、删除、移调等），只能拖拽编排
   if (layoutUi.editMode) return
 
   // 有弹窗打开时，除 Esc 外不响应主界面快捷键，避免在弹窗里误触发播放/删除等操作
@@ -102,36 +108,6 @@ function onKeyDown(event: KeyboardEvent): void {
   }
 }
 
-// ---------------------------------------------------------------- 区域尺寸拖拽
-
-/** 左栏宽度拖拽 */
-function startResizeLeft(event: PointerEvent): void {
-  event.preventDefault()
-  const startX = event.clientX
-  const startWidth = layout.leftWidth
-  const move = (e: PointerEvent): void => setLeftWidth(startWidth + (e.clientX - startX))
-  const up = (): void => {
-    window.removeEventListener('pointermove', move)
-    window.removeEventListener('pointerup', up)
-  }
-  window.addEventListener('pointermove', move)
-  window.addEventListener('pointerup', up)
-}
-
-/** 底部栏高度拖拽（向上拖为增高） */
-function startResizeBottom(event: PointerEvent): void {
-  event.preventDefault()
-  const startY = event.clientY
-  const startHeight = layout.bottomHeight
-  const move = (e: PointerEvent): void => setBottomHeight(startHeight + (startY - e.clientY))
-  const up = (): void => {
-    window.removeEventListener('pointermove', move)
-    window.removeEventListener('pointerup', up)
-  }
-  window.addEventListener('pointermove', move)
-  window.addEventListener('pointerup', up)
-}
-
 onMounted(() => {
   window.addEventListener('pointerdown', onFirstGesture)
   window.addEventListener('keydown', onKeyDown)
@@ -151,22 +127,18 @@ onBeforeUnmount(() => {
     <div v-if="layoutUi.editMode" class="edit-banner">
       <span class="dot" />
       <strong>布局编辑模式</strong>
-      <span class="hint">功能已锁定；可拖拽板块排序、拖动板块之间的分隔条调整宽高</span>
+      <span class="hint">功能已锁定；拖动板块标题栏到目标板块的上 / 下 / 左 / 右边缘即可插入</span>
       <span class="spacer" />
       <button @click="resetLayout">恢复默认</button>
       <button class="primary" @click="setEditMode(false)">完成</button>
     </div>
 
     <div class="app-body">
-      <div class="main-row">
-        <DockRegion region="left" />
-        <div v-if="layout.left.length" class="splitter splitter-v" title="拖动调整左栏宽度" @pointerdown="startResizeLeft" />
-        <DockRegion region="center" />
-      </div>
-
-      <div v-if="layout.bottom.length" class="splitter splitter-h" title="拖动调整底部栏高度" @pointerdown="startResizeBottom" />
-      <DockRegion region="bottom" />
+      <DockNode class="dock-root" :node="layout.root" />
     </div>
+
+    <!-- 插入预览：高亮目标板块的对应半边，直观表达插入后的占位 -->
+    <div v-if="layoutUi.dropRect" class="drop-preview" :style="dropPreviewStyle" />
 
     <ProjectDialog :open="historyOpen" @close="historyOpen = false" />
     <Transition name="mask-fade">
@@ -190,57 +162,27 @@ onBeforeUnmount(() => {
 .app-body {
   flex: 1;
   display: flex;
-  flex-direction: column;
   min-height: 0;
   min-width: 0;
 }
 
-.main-row {
+/* 布局树根节点撑满主工作区 */
+.dock-root {
   flex: 1;
-  display: flex;
-  min-height: 0;
   min-width: 0;
+  min-height: 0;
 }
 
-/* 区域分隔条 */
-.splitter {
-  flex: 0 0 6px;
-  position: relative;
-  z-index: 3;
-}
-
-.splitter-v {
-  cursor: col-resize;
-}
-
-.splitter-h {
-  cursor: row-resize;
-}
-
-.splitter-v::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 2px;
-  width: 1px;
-  background: var(--line);
-  transition: background 0.15s ease;
-}
-
-.splitter-h::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 2px;
-  height: 1px;
-  background: var(--line);
-  transition: background 0.15s ease;
-}
-
-.splitter:hover::after {
-  background: var(--accent);
+/* 插入预览层：不受板块内部层叠上下文影响 */
+.drop-preview {
+  position: fixed;
+  z-index: 500;
+  pointer-events: none;
+  background: var(--accent-soft);
+  border: 2px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: 0 0 12px var(--accent);
+  transition: left 0.12s ease, top 0.12s ease, width 0.12s ease, height 0.12s ease;
 }
 
 /* 编辑模式提示条 */

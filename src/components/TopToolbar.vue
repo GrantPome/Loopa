@@ -337,8 +337,8 @@ onBeforeUnmount(() => {
     <span v-if="!state.audioReady" class="hint">点击页面任意位置启用音频</span>
     <span v-else-if="state.statusText" class="status">{{ state.statusText }}</span>
 
-    <!-- 布局编辑模式下锁住工具栏全部功能，只允许在下方区域拖拽排序 -->
-    <div v-if="layoutUi.editMode" class="toolbar-mask" title="布局编辑模式：功能已锁定，仅可拖拽排序" />
+    <!-- 布局编辑模式下锁住工具栏全部功能，只允许在下方拖拽编排板块 -->
+    <div v-if="layoutUi.editMode" class="toolbar-mask" title="布局编辑模式：功能已锁定，仅可拖拽编排板块位置" />
   </header>
 </template>
 

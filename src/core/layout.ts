@@ -1,19 +1,21 @@
 /**
- * 布局与板块编排
+ * 布局编排（可任意嵌套的分割树）
  *
  * 设计：
- * - 界面划分为三个区域（左栏 / 中央主区 / 底部栏），每个区域是一个弹性容器，
- *   内部按顺序排列若干「功能板块」，板块可在区域内排序，也可跨区域互换。
- * - 区域尺寸（左栏宽、底部高）支持拖拽区域之间的分隔条调整。
- * - 板块尺寸（同一区域内各板块占主轴的比例）支持拖拽板块之间的分隔条调整。
- * - 布局配置持久化到 localStorage，刷新后保持不变。
- * - 编辑模式（从设置页进入）下，板块顶部出现拖拽标题栏，并显示插入位置指示线。
+ * - 整个界面是一棵布局树：叶子是功能板块，分支是「分割容器」（横向并排 / 纵向堆叠）。
+ * - 任意板块都能插入到另一个板块的上 / 下 / 左 / 右（插入语义，不是交换）：
+ *   · 目标板块所在容器的方向与插入方向一致 → 作为兄弟节点插入，并平分目标板块的占比；
+ *   · 方向不一致（或目标就是根节点）→ 把目标板块包进一个同方向的新容器，两者各占一半。
+ * - 子节点尺寸以「占比」形式挂在分割容器上，窗口缩放时等比自适应，不会出现空隙或溢出。
+ * - 布局配置持久化到 localStorage；归一化保证每个板块恰好出现一次、未知板块剔除、缺失板块补回，
+ *   旧版「三区域」数据会在加载时按当前窗口尺寸换算成布局树。
+ * - 编辑模式（从设置页进入）下板块顶部出现拖拽标题栏，拖动时目标板块的对应半边高亮作为插入预览。
  *
- * 拖拽采用 Pointer Events 实现（同时兼容鼠标与触屏），
- * 通过 document 上的区域/板块 DOM 做命中判定，避免维护大量 ref。
+ * 拖拽采用 Pointer Events 实现（同时兼容鼠标与触屏），命中判定直接读取板块 DOM 矩形，
+ * 因此嵌套层级再深也不需要额外维护 ref。
  */
-import { reactive, ref } from 'vue'
-import type { LayoutConfig, PanelId, RegionId } from '@/types'
+import { reactive } from 'vue'
+import type { DropZone, LayoutConfig, LayoutNode, PanelId, PanelNode, SplitNode } from '@/types'
 
 /** 板块显示名（编辑模式标题栏、拖拽提示使用） */
 export const PANEL_LABELS: Record<PanelId, string> = {
@@ -25,273 +27,486 @@ export const PANEL_LABELS: Record<PanelId, string> = {
   master: '总输出'
 }
 
-/** 区域渲染顺序 */
-export const REGION_ORDER: RegionId[] = ['left', 'center', 'bottom']
-
-/** 全部板块（用于布局归一化兜底） */
+/** 全部板块（归一化兜底用，顺序即默认出现顺序） */
 const ALL_PANELS: PanelId[] = ['tracks', 'fx', 'editor', 'inspector', 'keyboard', 'master']
 
-/** 区域尺寸约束 */
-export const LEFT_WIDTH_MIN = 200
-export const LEFT_WIDTH_MAX = 560
-export const BOTTOM_HEIGHT_MIN = 96
-export const BOTTOM_HEIGHT_MAX = 420
-
-/** 板块尺寸权重约束（相对于区域内其他板块的主轴占比） */
-export const PANEL_WEIGHT_MIN = 0.2
-export const PANEL_WEIGHT_MAX = 12
-
-/** 板块之间的分隔条宽度（px），与 DockRegion 中样式保持一致 */
+/** 板块之间的分隔条宽度（px），与 DockNode 中样式保持一致 */
 export const PANEL_SPLIT_SIZE = 6
 
 /** 板块主轴最小尺寸（px），避免被拖到不可见 */
 export const PANEL_MIN_MAIN = 56
 
+/** 占比下限：防止某个节点被拖成 0 后再也拖不回来 */
+const RATIO_MIN = 0.02
+
 const LAYOUT_KEY = 'muisc-editor:v1:layout'
 
-/**
- * 默认板块权重：
- * 左栏「轨道 / 效果器 / 音符检查器」等分；底部「虚拟键盘 : 总输出 = 3 : 1」，
- * 与旧版「总输出固定 232px」的观感基本一致。
- */
-export function defaultPanelWeight(): Record<PanelId, number> {
-  return { tracks: 1, fx: 1, editor: 1, inspector: 1, keyboard: 3, master: 1 }
+// ---------------------------------------------------------------- 树构建工具
+
+let splitSeq = 0
+
+/** 分割容器的稳定标识：列表渲染时用它复用组件实例 */
+function nextSplitKey(): string {
+  splitSeq += 1
+  return `s${splitSeq}`
 }
 
-/** 默认布局：与旧版三栏结构基本一致，音符检查器作为独立板块挂在左栏底部 */
-export function defaultLayout(): LayoutConfig {
+function panel(id: PanelId): PanelNode {
+  return { type: 'panel', id }
+}
+
+/** 新建分割容器；不传 sizes 时等分 */
+function split(dir: 'row' | 'column', children: LayoutNode[], sizes?: number[]): SplitNode {
   return {
-    left: ['tracks', 'fx', 'inspector'],
-    center: ['editor'],
-    bottom: ['keyboard', 'master'],
-    leftWidth: 288,
-    bottomHeight: 152,
-    panelWeight: defaultPanelWeight()
+    type: 'split',
+    key: nextSplitKey(),
+    dir,
+    children,
+    sizes: sizes ?? children.map(() => (children.length > 0 ? 1 / children.length : 1))
   }
 }
 
-function clampSize(value: unknown, fallback: number, min: number, max: number): number {
-  const n = typeof value === 'number' && Number.isFinite(value) ? value : fallback
-  return Math.min(max, Math.max(min, n))
+/** 占比归一化：总和为 1；数据异常时退化为等分 */
+function normalizeSizes(node: SplitNode): void {
+  const list = node.children.map((_, i) => {
+    const v = node.sizes[i]
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0
+  })
+  const total = list.reduce((sum, v) => sum + v, 0)
+  node.sizes =
+    total > 0 ? list.map((v) => v / total) : node.children.map(() => 1 / node.children.length)
 }
 
 /**
- * 布局归一化：保证每个板块恰好出现一次、未知板块剔除、缺失板块补回默认区域，
- * 这样即使 localStorage 里的数据被手工改坏，界面也不会出现板块丢失或重复。
+ * 折叠与合并（原地修改并返回节点，返回 null 表示该分支已被清空）：
+ * - 清空的容器直接删除；
+ * - 只剩一个子节点时用子节点顶替容器，避免无意义的嵌套；
+ * - 子容器与父容器方向相同时把子节点提升到父容器（占比相乘），保持树尽可能扁平。
  */
-function normalizeLayout(raw: Partial<LayoutConfig> | null): LayoutConfig {
-  const base = defaultLayout()
-  if (!raw) return base
+function collapseNode(node: LayoutNode): LayoutNode | null {
+  if (node.type === 'panel') return node
 
-  const seen = new Set<PanelId>()
-  const result: LayoutConfig = {
-    left: [],
-    center: [],
-    bottom: [],
-    leftWidth: 0,
-    bottomHeight: 0,
-    panelWeight: defaultPanelWeight()
-  }
-
-  for (const region of REGION_ORDER) {
-    const list = Array.isArray(raw[region]) ? (raw[region] as PanelId[]) : []
-    for (const id of list) {
-      if (ALL_PANELS.includes(id) && !seen.has(id)) {
-        seen.add(id)
-        result[region].push(id)
-      }
+  const children: LayoutNode[] = []
+  const sizes: number[] = []
+  node.children.forEach((child, i) => {
+    const kept = collapseNode(child)
+    if (!kept) return
+    const size = node.sizes[i] > 0 ? node.sizes[i] : 1
+    if (kept.type === 'split' && kept.dir === node.dir) {
+      kept.children.forEach((grandChild, j) => {
+        children.push(grandChild)
+        sizes.push(size * (kept.sizes[j] ?? 0))
+      })
+    } else {
+      children.push(kept)
+      sizes.push(size)
     }
-  }
-  for (const region of REGION_ORDER) {
-    for (const id of base[region]) {
-      if (!seen.has(id)) {
-        seen.add(id)
-        result[region].push(id)
-      }
+  })
+
+  if (children.length === 0) return null
+  if (children.length === 1) return children[0]
+  node.children = children
+  node.sizes = sizes
+  normalizeSizes(node)
+  return node
+}
+
+/** 查找板块所在的父容器、下标与节点本身（parent 为 null 表示它就是根） */
+interface PanelLocation {
+  parent: SplitNode | null
+  index: number
+  node: PanelNode
+}
+
+function findPanelLocation(root: LayoutNode, id: PanelId): PanelLocation | null {
+  const walk = (node: LayoutNode, parent: SplitNode | null, index: number): PanelLocation | null => {
+    if (node.type === 'panel') return node.id === id ? { parent, index, node } : null
+    for (let i = 0; i < node.children.length; i += 1) {
+      const found = walk(node.children[i], node, i)
+      if (found) return found
     }
+    return null
+  }
+  return walk(root, null, 0)
+}
+
+// ---------------------------------------------------------------- 默认布局
+
+/** 默认布局树：中段「左栏（轨道 / 效果器 / 音符检查器） | 编辑区」，底部「虚拟键盘 | 总输出」 */
+function defaultRoot(): SplitNode {
+  return split(
+    'column',
+    [
+      split(
+        'row',
+        [split('column', [panel('tracks'), panel('fx'), panel('inspector')]), panel('editor')],
+        [0.21, 0.79]
+      ),
+      split('row', [panel('keyboard'), panel('master')], [0.75, 0.25])
+    ],
+    [0.82, 0.18]
+  )
+}
+
+/** 默认布局（与旧版三栏观感基本一致） */
+export function defaultLayout(): LayoutConfig {
+  return { root: defaultRoot() }
+}
+
+// ---------------------------------------------------------------- 归一化与旧数据换算
+
+/** 旧版（三区域）布局数据 */
+type LegacyLayout = {
+  left?: PanelId[]
+  center?: PanelId[]
+  bottom?: PanelId[]
+  leftWidth?: number
+  bottomHeight?: number
+  panelWeight?: Partial<Record<PanelId, number>>
+}
+
+/** 是否为旧版三区域数据（用于加载时自动换算，避免用户手动迁移） */
+function isLegacy(raw: Record<string, unknown>): boolean {
+  return Array.isArray(raw.left) || Array.isArray(raw.center) || Array.isArray(raw.bottom)
+}
+
+/**
+ * 清洗布局树：剔除未知板块与重复板块（每个板块最多出现一次），
+ * 兼容缺 type 字段或 sizes 长度不一致的脏数据。
+ */
+function sanitize(raw: unknown, seen: Set<PanelId>): LayoutNode | null {
+  if (!raw || typeof raw !== 'object') return null
+  const node = raw as Partial<SplitNode> & { id?: unknown }
+  if (node.type !== 'split' || !Array.isArray(node.children)) {
+    const id = node.id as PanelId
+    if (typeof id !== 'string' || !ALL_PANELS.includes(id) || seen.has(id)) return null
+    seen.add(id)
+    return panel(id)
   }
 
-  result.leftWidth = clampSize(raw.leftWidth, base.leftWidth, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX)
-  result.bottomHeight = clampSize(raw.bottomHeight, base.bottomHeight, BOTTOM_HEIGHT_MIN, BOTTOM_HEIGHT_MAX)
+  const dir: 'row' | 'column' = node.dir === 'row' ? 'row' : 'column'
+  const rawSizes = Array.isArray(node.sizes) ? node.sizes : []
+  const children: LayoutNode[] = []
+  const sizes: number[] = []
+  node.children.forEach((child, i) => {
+    const kept = sanitize(child, seen)
+    if (!kept) return
+    const s = Number(rawSizes[i])
+    children.push(kept)
+    sizes.push(Number.isFinite(s) && s > 0 ? s : 1)
+  })
+  if (children.length === 0) return null
 
-  // 板块权重：逐项兜底，缺字段的老工程自动补默认值
-  const rawWeight = raw.panelWeight as Partial<Record<PanelId, number>> | undefined
-  for (const id of ALL_PANELS) {
-    result.panelWeight[id] = clampSize(
-      rawWeight?.[id],
-      base.panelWeight[id],
-      PANEL_WEIGHT_MIN,
-      PANEL_WEIGHT_MAX
-    )
-  }
+  const result = split(dir, children, sizes)
+  if (typeof node.key === 'string' && node.key) result.key = node.key
   return result
 }
 
+/** 归一化新格式数据：清洗 + 折叠，返回可用的布局树 */
+function normalizeTree(raw: Record<string, unknown>): LayoutNode | null {
+  const seen = new Set<PanelId>()
+  const candidate = 'root' in raw ? raw.root : raw
+  const cleaned = sanitize(candidate, seen)
+  return cleaned ? collapseNode(cleaned) : null
+}
+
+/**
+ * 旧版三区域数据 → 布局树：
+ * 区域内的板块顺序沿用原数组，尺寸用原来的权重 / 像素值按当前窗口换算成占比。
+ */
+function legacyToTree(raw: LegacyLayout): LayoutNode | null {
+  const ids = (value: unknown): PanelId[] =>
+    Array.isArray(value) ? (value as PanelId[]).filter((id) => ALL_PANELS.includes(id)) : []
+  const weightOf = (id: PanelId): number => {
+    const w = raw.panelWeight?.[id]
+    return typeof w === 'number' && w > 0 ? w : 1
+  }
+  const stack = (list: PanelId[], dir: 'row' | 'column'): SplitNode | null =>
+    list.length === 0 ? null : split(dir, list.map(panel), list.map(weightOf))
+
+  const left = stack(ids(raw.left), 'column')
+  const center = stack(ids(raw.center), 'column')
+  const bottom = stack(ids(raw.bottom), 'row')
+
+  const viewW = typeof window !== 'undefined' && window.innerWidth > 0 ? window.innerWidth : 1280
+  const viewH = typeof window !== 'undefined' && window.innerHeight > 0 ? window.innerHeight : 800
+  const leftWidth = raw.leftWidth && raw.leftWidth > 0 ? raw.leftWidth : viewW * 0.22
+  const bottomHeight = raw.bottomHeight && raw.bottomHeight > 0 ? raw.bottomHeight : viewH * 0.18
+
+  // 中段一行：左栏（原固定像素）| 中央主区（占剩余空间）
+  const rowChildren: LayoutNode[] = []
+  const rowSizes: number[] = []
+  if (left) {
+    rowChildren.push(left)
+    rowSizes.push(leftWidth)
+  }
+  if (center) {
+    rowChildren.push(center)
+    rowSizes.push(Math.max(240, viewW - leftWidth - PANEL_SPLIT_SIZE))
+  }
+  const mainRow = rowChildren.length > 0 ? split('row', rowChildren, rowSizes) : null
+
+  // 底部一行：原固定高度向上换算
+  const colChildren: LayoutNode[] = []
+  const colSizes: number[] = []
+  if (mainRow) {
+    colChildren.push(mainRow)
+    colSizes.push(Math.max(160, viewH - bottomHeight - PANEL_SPLIT_SIZE))
+  }
+  if (bottom) {
+    colChildren.push(bottom)
+    colSizes.push(bottomHeight)
+  }
+  if (colChildren.length === 0) return null
+  return collapseNode(split('column', colChildren, colSizes))
+}
+
+// ---------------------------------------------------------------- 读写与持久化
+
 function loadLayout(): LayoutConfig {
   try {
-    const raw = localStorage.getItem(LAYOUT_KEY)
-    return normalizeLayout(raw ? (JSON.parse(raw) as Partial<LayoutConfig>) : null)
+    const text = localStorage.getItem(LAYOUT_KEY)
+    if (!text) return { root: defaultRoot() }
+    const raw = JSON.parse(text) as unknown
+    if (!raw || typeof raw !== 'object') return { root: defaultRoot() }
+    const record = raw as Record<string, unknown>
+    const tree = isLegacy(record) ? legacyToTree(record as LegacyLayout) : normalizeTree(record)
+    return { root: tree ?? defaultRoot() }
   } catch {
-    return defaultLayout()
+    return { root: defaultRoot() }
   }
 }
 
-/** 当前布局（响应式） */
+/** 当前布局（响应式布局树） */
 export const layout = reactive<LayoutConfig>(loadLayout())
 
 /** 编辑模式与拖拽过程中的临时状态（不持久化） */
 export const layoutUi = reactive({
   editMode: false,
+  /** 正在拖拽的板块 */
   dragPanel: null as PanelId | null,
-  dropRegion: null as RegionId | null,
-  dropIndex: -1
+  /** 当前插入目标板块 */
+  dropPanel: null as PanelId | null,
+  /** 插入方位 */
+  dropZone: null as DropZone | null,
+  /** 插入预览矩形（视口坐标）：高亮目标板块的对应半边 */
+  dropRect: null as { left: number; top: number; width: number; height: number } | null
 })
-
-/** 插入位置指示线：region + 相对区域的像素偏移 + 方向 */
-export const dropLine = ref<{ region: RegionId; offset: number; horizontal: boolean } | null>(null)
 
 function persist(): void {
   try {
-    localStorage.setItem(
-      LAYOUT_KEY,
-      JSON.stringify({
-        left: layout.left,
-        center: layout.center,
-        bottom: layout.bottom,
-        leftWidth: layout.leftWidth,
-        bottomHeight: layout.bottomHeight,
-        panelWeight: layout.panelWeight
-      })
-    )
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ root: layout.root }))
   } catch {
     // 忽略存储配额异常，布局丢失不影响功能
   }
 }
+
+/**
+ * 补回缺失板块：按默认顺序找到就近的已存在板块作锚点，插到它旁边。
+ * 这样即使 localStorage 数据被手工改坏（板块被删掉），界面也不会缺板块。
+ */
+function fillMissingPanels(): void {
+  const present = new Set<PanelId>()
+  const collect = (node: LayoutNode): void => {
+    if (node.type === 'panel') present.add(node.id)
+    else node.children.forEach(collect)
+  }
+  collect(layout.root)
+
+  let changed = false
+  for (const id of ALL_PANELS) {
+    if (present.has(id)) continue
+    const at = ALL_PANELS.indexOf(id)
+    let anchor: PanelId | null = null
+    for (let i = at - 1; i >= 0 && !anchor; i -= 1) if (present.has(ALL_PANELS[i])) anchor = ALL_PANELS[i]
+    for (let i = at + 1; i < ALL_PANELS.length && !anchor; i += 1) {
+      if (present.has(ALL_PANELS[i])) anchor = ALL_PANELS[i]
+    }
+    if (!anchor) continue
+    insertAfter(anchor, id)
+    present.add(id)
+    changed = true
+  }
+  if (changed) persist()
+}
+
+// 载入后立即补全缺失板块（模块初始化时执行一次）
+fillMissingPanels()
+
+// ---------------------------------------------------------------- 插入 / 移除
+
+/**
+ * 在锚点板块之后插入一个兄弟板块（方向跟随父容器；锚点就是根时新建纵向容器）。
+ * 主要用于补回缺失板块，也可作为「向右 / 向下插入」的简化入口。
+ */
+function insertAfter(anchor: PanelId, id: PanelId): void {
+  const at = findPanelLocation(layout.root, anchor)
+  if (!at) {
+    layout.root = appendToRoot(layout.root, panel(id))
+    return
+  }
+  if (!at.parent) {
+    layout.root = split('column', [at.node, panel(id)], [0.6, 0.4])
+    return
+  }
+  const share = at.parent.sizes[at.index] / 2
+  at.parent.sizes[at.index] = share
+  at.parent.children.splice(at.index + 1, 0, panel(id))
+  at.parent.sizes.splice(at.index + 1, 0, share)
+}
+
+/** 把节点挂到根容器末尾（根是单板块时新建纵向容器） */
+function appendToRoot(root: LayoutNode, node: LayoutNode): LayoutNode {
+  if (root.type === 'panel') return split('column', [root, node], [0.6, 0.4])
+  const avg =
+    root.sizes.length > 0 ? root.sizes.reduce((sum, v) => sum + v, 0) / root.sizes.length : 1
+  root.children.push(node)
+  root.sizes.push(avg)
+  return root
+}
+
+/** 从树上摘下某个板块（其余兄弟按比例吸收空出的占比，并折叠多余容器） */
+function removePanel(id: PanelId): void {
+  const at = findPanelLocation(layout.root, id)
+  if (!at || !at.parent) return
+  at.parent.children.splice(at.index, 1)
+  at.parent.sizes.splice(at.index, 1)
+  layout.root = collapseNode(layout.root) ?? layout.root
+}
+
+/**
+ * 把板块插入到目标板块的指定方位（核心「插入」逻辑）。
+ * @param id 被拖拽的板块
+ * @param target 目标板块
+ * @param zone 插入到目标的哪一侧
+ */
+export function insertPanel(id: PanelId, target: PanelId, zone: DropZone): void {
+  if (id === target) return
+
+  // 先把自己从原位置摘下，再重新插入，保证「移动 + 插入」两个语义合并为一步
+  removePanel(id)
+  const at = findPanelLocation(layout.root, target)
+  if (!at) {
+    layout.root = appendToRoot(layout.root, panel(id))
+    persist()
+    return
+  }
+
+  const horizontal = zone === 'left' || zone === 'right'
+  const dir: 'row' | 'column' = horizontal ? 'row' : 'column'
+  const after = zone === 'right' || zone === 'bottom'
+
+  if (at.parent && at.parent.dir === dir) {
+    // 方向一致：作为兄弟插入，平分目标板块的占比
+    const share = at.parent.sizes[at.index] / 2
+    at.parent.sizes[at.index] = share
+    const pos = after ? at.index + 1 : at.index
+    at.parent.children.splice(pos, 0, panel(id))
+    at.parent.sizes.splice(pos, 0, share)
+  } else {
+    // 方向不一致：把目标板块包进一个同方向的新容器，顶替它原来的位置
+    const wrapper = split(dir, after ? [at.node, panel(id)] : [panel(id), at.node], [0.5, 0.5])
+    if (at.parent) at.parent.children[at.index] = wrapper
+    else layout.root = wrapper
+  }
+
+  const collapsed = collapseNode(layout.root)
+  if (collapsed) layout.root = collapsed
+  persist()
+}
+
+// ---------------------------------------------------------------- 编辑模式
 
 /** 进入 / 退出布局编辑模式 */
 export function setEditMode(on: boolean): void {
   layoutUi.editMode = on
   if (!on) {
     endDrag()
-    stopPanelResize()
+    stopSplitResize()
   }
 }
 
-/** 恢复默认布局与默认尺寸 */
+/** 恢复默认布局 */
 export function resetLayout(): void {
-  const base = defaultLayout()
-  layout.left = base.left
-  layout.center = base.center
-  layout.bottom = base.bottom
-  layout.leftWidth = base.leftWidth
-  layout.bottomHeight = base.bottomHeight
-  layout.panelWeight = base.panelWeight
+  layout.root = defaultRoot()
   persist()
 }
 
-/**
- * 把板块移动到目标区域的指定下标。
- * 下标基于「不包含被拖拽板块」的列表，因此先移除再插入即可，
- * 与拖拽时命中判定的口径保持一致。
- */
-export function movePanel(panel: PanelId, target: RegionId, index: number): void {
-  for (const region of REGION_ORDER) {
-    const i = layout[region].indexOf(panel)
-    if (i >= 0) layout[region].splice(i, 1)
+// ---------------------------------------------------------------- 拖拽插入
+
+/** 指针偏向矩形的哪条边（取最近的一条，即插到哪一侧） */
+function nearestZone(rect: DOMRect, x: number, y: number): DropZone {
+  const left = x - rect.left
+  const right = rect.right - x
+  const top = y - rect.top
+  const bottom = rect.bottom - y
+  const min = Math.min(left, right, top, bottom)
+  if (min === left) return 'left'
+  if (min === right) return 'right'
+  if (min === top) return 'top'
+  return 'bottom'
+}
+
+/** 插入预览矩形：目标板块在该方向上的半边 */
+function halfRect(rect: DOMRect, zone: DropZone): { left: number; top: number; width: number; height: number } {
+  const halfW = rect.width / 2
+  const halfH = rect.height / 2
+  if (zone === 'left') return { left: rect.left, top: rect.top, width: halfW, height: rect.height }
+  if (zone === 'right') return { left: rect.left + halfW, top: rect.top, width: halfW, height: rect.height }
+  if (zone === 'top') return { left: rect.left, top: rect.top, width: rect.width, height: halfH }
+  return { left: rect.left, top: rect.top + halfH, width: rect.width, height: halfH }
+}
+
+/** 可作为落点的板块（排除正在拖拽的那个） */
+function panelTargets(): { id: PanelId; rect: DOMRect }[] {
+  const els = Array.from(document.querySelectorAll<HTMLElement>('.dock-panel[data-panel]'))
+  const out: { id: PanelId; rect: DOMRect }[] = []
+  for (const el of els) {
+    const id = el.dataset.panel as PanelId | undefined
+    if (!id || id === layoutUi.dragPanel) continue
+    out.push({ id, rect: el.getBoundingClientRect() })
   }
-  const list = layout[target]
-  const at = Math.max(0, Math.min(index, list.length))
-  list.splice(at, 0, panel)
-  persist()
+  return out
 }
 
-/** 设置左栏宽度（会被约束在允许范围内） */
-export function setLeftWidth(px: number): void {
-  layout.leftWidth = clampSize(px, layout.leftWidth, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX)
-  persist()
+function setDrop(panel: PanelId, zone: DropZone, rect: DOMRect): void {
+  layoutUi.dropPanel = panel
+  layoutUi.dropZone = zone
+  layoutUi.dropRect = halfRect(rect, zone)
 }
 
-/** 设置底部栏高度（会被约束在允许范围内） */
-export function setBottomHeight(px: number): void {
-  layout.bottomHeight = clampSize(px, layout.bottomHeight, BOTTOM_HEIGHT_MIN, BOTTOM_HEIGHT_MAX)
-  persist()
+function clearDrop(): void {
+  layoutUi.dropPanel = null
+  layoutUi.dropZone = null
+  layoutUi.dropRect = null
 }
 
-// ---------------------------------------------------------------- 拖拽编排
+/** 根据指针位置更新插入目标：优先命中板块本体，落在缝隙里时取最近的板块 */
+function updateDropTarget(x: number, y: number): void {
+  const targets = panelTargets()
 
-function regionEl(region: RegionId): HTMLElement | null {
-  return document.querySelector<HTMLElement>(`.dock-region[data-region="${region}"]`)
-}
-
-/** 计算插入下标：与各板块中心线比较（底部区域横向，其余纵向） */
-function indexAt(region: RegionId, clientX: number, clientY: number): number {
-  const el = regionEl(region)
-  if (!el) return 0
-  // 排除正在拖拽的板块，使下标口径与 movePanel 一致
-  const panels = Array.from(el.querySelectorAll<HTMLElement>('.dock-panel:not(.dragging)'))
-  const horizontal = region === 'bottom'
-  let index = panels.length
-  for (let i = 0; i < panels.length; i += 1) {
-    const rect = panels[i].getBoundingClientRect()
-    const mid = horizontal ? rect.left + rect.width / 2 : rect.top + rect.height / 2
-    const pos = horizontal ? clientX : clientY
-    if (pos < mid) {
-      index = i
-      break
-    }
-  }
-  return index
-}
-
-/** 计算插入指示线相对目标区域的偏移，用于绝对定位绘制 */
-function updateDropLine(region: RegionId, index: number): void {
-  const el = regionEl(region)
-  if (!el) {
-    dropLine.value = null
-    return
-  }
-  const regionRect = el.getBoundingClientRect()
-  const panels = Array.from(el.querySelectorAll<HTMLElement>('.dock-panel:not(.dragging)'))
-  const horizontal = region === 'bottom'
-
-  if (panels.length === 0) {
-    dropLine.value = { region, offset: horizontal ? regionRect.width / 2 : regionRect.height / 2, horizontal }
+  for (const target of targets) {
+    const r = target.rect
+    if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue
+    setDrop(target.id, nearestZone(r, x, y), r)
     return
   }
 
-  let offset: number
-  if (index <= 0) {
-    const rect = panels[0].getBoundingClientRect()
-    offset = (horizontal ? rect.left : rect.top) - (horizontal ? regionRect.left : regionRect.top)
-  } else if (index >= panels.length) {
-    const rect = panels[panels.length - 1].getBoundingClientRect()
-    offset = (horizontal ? rect.right : rect.bottom) - (horizontal ? regionRect.left : regionRect.top)
-  } else {
-    const prev = panels[index - 1].getBoundingClientRect()
-    const next = panels[index].getBoundingClientRect()
-    offset = horizontal
-      ? (prev.right + next.left) / 2 - regionRect.left
-      : (prev.bottom + next.top) / 2 - regionRect.top
+  let nearest: { id: PanelId; rect: DOMRect; dist: number } | null = null
+  for (const target of targets) {
+    const r = target.rect
+    const dx = Math.max(r.left - x, 0, x - r.right)
+    const dy = Math.max(r.top - y, 0, y - r.bottom)
+    const dist = Math.hypot(dx, dy)
+    if (!nearest || dist < nearest.dist) nearest = { id: target.id, rect: r, dist }
   }
-  dropLine.value = { region, offset, horizontal }
-}
-
-/** 根据指针位置更新当前落点区域、下标与指示线 */
-function updateDropTarget(clientX: number, clientY: number): void {
-  for (const region of REGION_ORDER) {
-    const el = regionEl(region)
-    if (!el) continue
-    const rect = el.getBoundingClientRect()
-    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) continue
-    const index = indexAt(region, clientX, clientY)
-    layoutUi.dropRegion = region
-    layoutUi.dropIndex = index
-    updateDropLine(region, index)
+  if (nearest && nearest.dist <= 40) {
+    const cx = Math.min(Math.max(x, nearest.rect.left), nearest.rect.right)
+    const cy = Math.min(Math.max(y, nearest.rect.top), nearest.rect.bottom)
+    setDrop(nearest.id, nearestZone(nearest.rect, cx, cy), nearest.rect)
     return
   }
-  layoutUi.dropRegion = null
-  layoutUi.dropIndex = -1
-  dropLine.value = null
+  clearDrop()
 }
 
 let dragging = false
@@ -303,9 +518,9 @@ function onDragMove(event: PointerEvent): void {
 
 function onDragEnd(): void {
   const panel = layoutUi.dragPanel
-  if (panel && layoutUi.dropRegion && layoutUi.dropIndex >= 0) {
-    movePanel(panel, layoutUi.dropRegion, layoutUi.dropIndex)
-  }
+  const target = layoutUi.dropPanel
+  const zone = layoutUi.dropZone
+  if (panel && target && zone) insertPanel(panel, target, zone)
   endDrag()
 }
 
@@ -314,31 +529,20 @@ function onDragKey(event: KeyboardEvent): void {
 }
 
 function endDrag(): void {
-  if (!dragging) {
-    layoutUi.dragPanel = null
-    layoutUi.dropRegion = null
-    layoutUi.dropIndex = -1
-    dropLine.value = null
-    return
-  }
   dragging = false
   layoutUi.dragPanel = null
-  layoutUi.dropRegion = null
-  layoutUi.dropIndex = -1
-  dropLine.value = null
+  clearDrop()
   window.removeEventListener('pointermove', onDragMove)
   window.removeEventListener('pointerup', onDragEnd)
   window.removeEventListener('keydown', onDragKey)
 }
 
-/** 从板块标题栏开始拖拽 */
+/** 从板块标题栏（或整块遮罩）开始拖拽 */
 export function startPanelDrag(event: PointerEvent, panel: PanelId): void {
   if (!layoutUi.editMode) return
   event.preventDefault()
   layoutUi.dragPanel = panel
-  layoutUi.dropRegion = null
-  layoutUi.dropIndex = -1
-  dropLine.value = null
+  clearDrop()
   dragging = true
   window.addEventListener('pointermove', onDragMove)
   window.addEventListener('pointerup', onDragEnd)
@@ -346,115 +550,93 @@ export function startPanelDrag(event: PointerEvent, panel: PanelId): void {
   updateDropTarget(event.clientX, event.clientY)
 }
 
-// ---------------------------------------------------------------- 板块尺寸调整
-// 同一区域内相邻板块之间渲染一条分隔条，拖拽它改变两者的主轴占比。
-// 尺寸以「权重」形式存储：板块主轴尺寸 = 可用主轴长 × 权重 / 同区域权重之和，
-// 因此窗口缩放时各板块按比例自适应，不会出现空隙或溢出。
+// ---------------------------------------------------------------- 尺寸调整
+// 相邻两个子板块之间渲染一条分隔条，拖拽它改变两者的占比。
+// 占比挂在父容器上，父容器的占比总和保持不变，因此同级其它板块尺寸不受影响，
+// 窗口缩放时各板块按占比等比自适应。
 
-/** 一次板块尺寸拖拽的上下文快照 */
 interface ResizeContext {
-  region: RegionId
-  /** 分隔条前后两个相邻板块 */
-  a: PanelId
-  b: PanelId
+  node: SplitNode
+  index: number
   /** 指针起始坐标（主轴方向） */
   startPos: number
-  /** 两个板块起始时的主轴像素尺寸 */
+  /** 相邻两个子节点的起始像素尺寸 */
   startA: number
   startB: number
-  /** 拖拽开始时该区域所有板块的权重之和（保持不变，保证其余板块不受影响） */
-  totalWeight: number
-  /** 该区域可用于排布板块的主轴长度（已扣除板块之间的分隔条） */
+  /** 容器内占比总和（保持不变） */
+  total: number
+  /** 容器主轴可用长度（已扣除分隔条占位） */
   available: number
   horizontal: boolean
 }
 
 let resizeCtx: ResizeContext | null = null
 
-/** 该区域主轴方向（横向区域看宽度，纵向区域看高度） */
-function isHorizontalRegion(region: RegionId): boolean {
-  return region === 'bottom'
-}
-
-/** 开始拖拽板块之间的分隔条，调整相邻两个板块的宽高 */
-export function startPanelResize(event: PointerEvent, region: RegionId, index: number): void {
+/** 开始拖拽某容器内相邻子节点之间的分隔条 */
+export function startSplitResize(event: PointerEvent, node: SplitNode, index: number): void {
   if (!layoutUi.editMode) return
   event.preventDefault()
-  const list = layout[region]
-  const a = list[index]
-  const b = list[index + 1]
-  const el = regionEl(region)
-  if (!a || !b || !el) return
+  const splitter = event.currentTarget as HTMLElement | null
+  const prev = splitter?.previousElementSibling as HTMLElement | null
+  const next = splitter?.nextElementSibling as HTMLElement | null
+  const container = splitter?.parentElement ?? null
+  if (!prev || !next || !container) return
 
-  const elA = el.querySelector<HTMLElement>(`.dock-panel[data-panel="${a}"]`)
-  const elB = el.querySelector<HTMLElement>(`.dock-panel[data-panel="${b}"]`)
-  if (!elA || !elB) return
-
-  const horizontal = isHorizontalRegion(region)
-  const rectA = elA.getBoundingClientRect()
-  const rectB = elB.getBoundingClientRect()
+  const horizontal = node.dir === 'row'
+  const rectA = prev.getBoundingClientRect()
+  const rectB = next.getBoundingClientRect()
   const startA = horizontal ? rectA.width : rectA.height
   const startB = horizontal ? rectB.width : rectB.height
-
-  const regionMain = horizontal ? el.clientWidth : el.clientHeight
-  // 扣除板块之间的分隔条占位，使权重换算出的像素尺寸与实际渲染一致
-  const available = regionMain - Math.max(0, list.length - 1) * PANEL_SPLIT_SIZE
+  const containerMain = horizontal ? container.clientWidth : container.clientHeight
+  // 扣除分隔条占位，使占比换算出的像素尺寸与实际渲染一致
+  const available = containerMain - Math.max(0, node.children.length - 1) * PANEL_SPLIT_SIZE
   if (available <= 0 || startA <= 0 || startB <= 0) return
 
-  const totalWeight = list.reduce((sum, p) => sum + layout.panelWeight[p], 0)
-  if (totalWeight <= 0) return
+  const total = node.sizes.reduce((sum, v) => sum + (Number.isFinite(v) ? v : 0), 0)
+  if (total <= 0) return
 
   resizeCtx = {
-    region,
-    a,
-    b,
+    node,
+    index,
     startPos: horizontal ? event.clientX : event.clientY,
     startA,
     startB,
-    totalWeight,
+    total,
     available,
     horizontal
   }
   document.body.style.cursor = horizontal ? 'col-resize' : 'row-resize'
-  window.addEventListener('pointermove', onPanelResizeMove)
-  window.addEventListener('pointerup', onPanelResizeEnd)
+  window.addEventListener('pointermove', onSplitResizeMove)
+  window.addEventListener('pointerup', onSplitResizeEnd)
 }
 
-function onPanelResizeMove(event: PointerEvent): void {
+function onSplitResizeMove(event: PointerEvent): void {
   const ctx = resizeCtx
   if (!ctx) return
   const pos = ctx.horizontal ? event.clientX : event.clientY
-  const delta = pos - ctx.startPos
   const pairTotal = ctx.startA + ctx.startB
-  // 两个板块尺寸守恒：a 变多少，b 就反向变多少；各自不小于最小尺寸
-  const targetA = clampSize(ctx.startA + delta, ctx.startA, PANEL_MIN_MAIN, pairTotal - PANEL_MIN_MAIN)
-  const targetB = pairTotal - targetA
-  // 像素 → 权重：权重和保持不变，因此同区域其余板块尺寸不受影响
-  layout.panelWeight[ctx.a] = clampSize(
-    (ctx.totalWeight * targetA) / ctx.available,
-    layout.panelWeight[ctx.a],
-    PANEL_WEIGHT_MIN,
-    PANEL_WEIGHT_MAX
-  )
-  layout.panelWeight[ctx.b] = clampSize(
-    (ctx.totalWeight * targetB) / ctx.available,
-    layout.panelWeight[ctx.b],
-    PANEL_WEIGHT_MIN,
-    PANEL_WEIGHT_MAX
-  )
+  // 两个子节点尺寸守恒：A 变多少 B 就反向变多少，各自不小于最小尺寸
+  const minMain = Math.min(PANEL_MIN_MAIN, pairTotal / 2)
+  const targetA = Math.min(Math.max(ctx.startA + (pos - ctx.startPos), minMain), pairTotal - minMain)
+  const ratioA = ctx.total * (targetA / ctx.available)
+  const ratioB = ctx.total * ((pairTotal - targetA) / ctx.available)
+  // 再兜一层占比下限，保证拖到极小也还能拖回来
+  const lo = ctx.total * RATIO_MIN
+  const hi = ctx.total * (1 - RATIO_MIN)
+  ctx.node.sizes[ctx.index] = Math.min(Math.max(ratioA, lo), hi)
+  ctx.node.sizes[ctx.index + 1] = Math.min(Math.max(ratioB, lo), hi)
   persist()
 }
 
-function onPanelResizeEnd(): void {
-  if (!resizeCtx) return
-  stopPanelResize()
+function onSplitResizeEnd(): void {
+  stopSplitResize()
   persist()
 }
 
-/** 结束板块尺寸拖拽（退出编辑模式时也要调用，避免监听器残留） */
-function stopPanelResize(): void {
+/** 结束尺寸拖拽（退出编辑模式时也要调用，避免监听器残留） */
+function stopSplitResize(): void {
   resizeCtx = null
   document.body.style.cursor = ''
-  window.removeEventListener('pointermove', onPanelResizeMove)
-  window.removeEventListener('pointerup', onPanelResizeEnd)
+  window.removeEventListener('pointermove', onSplitResizeMove)
+  window.removeEventListener('pointerup', onSplitResizeEnd)
 }

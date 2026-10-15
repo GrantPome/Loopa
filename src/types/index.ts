@@ -293,28 +293,38 @@ export type VolumeDisplay = 'db' | 'linear'
  */
 export type DeviceMode = 'pc' | 'pad'
 
-/**
- * 布局区域：左侧栏 / 中央主区 / 底部栏
- * 每个区域是一个弹性容器，内部按顺序排列若干功能板块。
- */
-export type RegionId = 'left' | 'center' | 'bottom'
-
 /** 可自由编排位置的功能板块 */
 export type PanelId = 'tracks' | 'fx' | 'editor' | 'inspector' | 'keyboard' | 'master'
 
+/** 拖放方位：把板块插入到目标板块的上 / 下 / 左 / 右 */
+export type DropZone = 'top' | 'bottom' | 'left' | 'right'
+
+/** 布局树叶子节点：一个功能板块 */
+export interface PanelNode {
+  type: 'panel'
+  id: PanelId
+}
+
 /**
- * 可持久化的布局配置：
- * - left/center/bottom：各区域内的板块顺序
- * - leftWidth/bottomHeight：区域尺寸（拖拽区域分隔条调整）
- * - panelWeight：板块在所属区域主轴上的尺寸权重（拖拽板块间分隔条调整）
+ * 布局树分支节点：沿 dir 方向排列若干子节点
+ * - dir：'row' 横向并排 / 'column' 纵向堆叠
+ * - sizes：各子节点占主轴的比例（与 children 等长，总和为 1）
+ * - key：稳定标识，供列表渲染复用组件实例（重排后画布等内部状态不丢失）
  */
+export interface SplitNode {
+  type: 'split'
+  key: string
+  dir: 'row' | 'column'
+  children: LayoutNode[]
+  sizes: number[]
+}
+
+/** 布局树节点 */
+export type LayoutNode = PanelNode | SplitNode
+
+/** 可持久化的布局配置：一棵可任意嵌套的布局树 */
 export interface LayoutConfig {
-  left: PanelId[]
-  center: PanelId[]
-  bottom: PanelId[]
-  leftWidth: number
-  bottomHeight: number
-  panelWeight: Record<PanelId, number>
+  root: LayoutNode
 }
 
 // ---------------------------------------------------------------- 自动化包络
