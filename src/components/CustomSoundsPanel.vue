@@ -11,7 +11,7 @@
  *
  * 采样 PCM 存入 IndexedDB，工程 JSON 只保存元信息与音号映射。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { CustomInstrumentKind, CustomSample } from '@/types'
 import { GM_DRUM_NOTES, drumNoteLabel } from '@/types'
 import {
@@ -24,6 +24,7 @@ import {
   setCustomInstrumentGain,
   setCustomInstrumentKind,
   state,
+  stopInstrumentPreview,
   updateCustomSample
 } from '@/core/store'
 import { MAX_MIDI, MIN_MIDI, clamp, midiToNoteName } from '@/utils/music'
@@ -150,6 +151,71 @@ function onRemoveSample(sample: CustomSample): void {
   void removeCustomSample(selected.value.id, sample.id)
 }
 
+// ---------------------------------------------------------------- 依次试听全部采样
+// 点击任意采样行的 ▶，都会把当前这套音源（乐器）的所有采样依次播一遍，
+// 方便一次听完自己拼好的整套音色；连播中再次点击即中断。
+
+/** 正在试听的采样 key（用于按钮上的播放状态反馈） */
+const auditioningKey = ref('')
+/** 是否正在依次试听当前音源的全部采样 */
+const playingSamples = ref(false)
+/** 连播代号：自增即可让上一轮循环自行退出 */
+let samplesRun = 0
+/** 采样之间的间隔定时器句柄 */
+let samplesTimer = 0
+
+/** 等待指定毫秒（用于控制相邻两个采样的间隔） */
+function waitSampleGap(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.clearTimeout(samplesTimer)
+    samplesTimer = window.setTimeout(resolve, ms)
+  })
+}
+
+/** 中断连播并收掉正在响的试听声音 */
+function stopSamplePreview(): void {
+  samplesRun += 1
+  playingSamples.value = false
+  auditioningKey.value = ''
+  window.clearTimeout(samplesTimer)
+  stopInstrumentPreview()
+}
+
+/**
+ * 依次试听当前音源的全部采样。
+ * 每个采样按自身长度原速播完（鼓组按绑定音号、旋律按原始音高），
+ * 再留一点间隔切下一个，避免多个采样的尾巴叠在一起。
+ */
+async function onPreviewSamples(): Promise<void> {
+  const instrument = selected.value
+  if (!instrument || instrument.samples.length === 0) return
+  if (playingSamples.value) {
+    stopSamplePreview()
+    return
+  }
+  playingSamples.value = true
+  const run = ++samplesRun
+  for (const sample of instrument.samples) {
+    if (run !== samplesRun) return
+    auditioningKey.value = sample.key
+    await previewCustomSample(sample.key)
+    await waitSampleGap(Math.max(400, sample.duration * 1000) + 220)
+  }
+  if (run === samplesRun) {
+    playingSamples.value = false
+    auditioningKey.value = ''
+  }
+}
+
+onBeforeUnmount(() => {
+  stopSamplePreview()
+})
+
+// 切换到另一套音源时，立刻中断上一套的连播，避免声音继续往后播
+watch(selectedId, () => {
+  if (playingSamples.value) stopSamplePreview()
+})
+
 function onRemoveInstrument(): void {
   const instrument = selected.value
   if (!instrument) return
@@ -258,7 +324,14 @@ function onRemoveInstrument(): void {
                     @change="onSampleName($event, sample)"
                   />
                   <span class="sample-dur">{{ sample.duration.toFixed(2) }}s</span>
-                  <button class="mini" title="试听采样" @click="previewCustomSample(sample.key)">▶</button>
+                  <button
+                    class="mini"
+                    :class="{ playing: auditioningKey === sample.key }"
+                    :title="playingSamples ? '停止依次试听' : '依次试听这套音源的全部采样'"
+                    @click="onPreviewSamples"
+                  >
+                    ▶
+                  </button>
                   <button class="mini danger" title="删除采样" @click="onRemoveSample(sample)">✕</button>
                 </div>
 
@@ -504,6 +577,15 @@ function onRemoveInstrument(): void {
   line-height: 1.1;
   font-size: 12px;
   flex: 0 0 auto;
+}
+
+/* 依次试听中的采样：按钮做成主题色激活态，方便看出当前播到哪一个 */
+.mini.playing {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0d1117;
+  font-weight: 600;
+  box-shadow: 0 0 0 1px var(--accent), 0 2px 8px rgba(79, 157, 247, 0.35);
 }
 
 .danger:hover {
