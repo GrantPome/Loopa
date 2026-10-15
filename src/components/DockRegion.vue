@@ -12,6 +12,7 @@ import { PANEL_LABELS, dropLine, layout, layoutUi, startPanelDrag, startPanelRes
 import TrackList from './TrackList.vue'
 import FxPanel from './FxPanel.vue'
 import EditorPanel from './EditorPanel.vue'
+import NoteInspector from './NoteInspector.vue'
 import VirtualKeyboard from './VirtualKeyboard.vue'
 import MasterPanel from './MasterPanel.vue'
 
@@ -22,6 +23,7 @@ const COMPONENTS: Record<PanelId, Component> = {
   tracks: TrackList,
   fx: FxPanel,
   editor: EditorPanel,
+  inspector: NoteInspector,
   keyboard: VirtualKeyboard,
   master: MasterPanel
 }

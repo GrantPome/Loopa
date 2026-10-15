@@ -214,10 +214,12 @@ function onTranspose(semitones: number): void {
 </template>
 
 <style scoped>
+/* 作为独立板块：撑满所在面板，内容超出时自身滚动 */
 .inspector {
-  flex: 0 0 208px;
-  width: 208px;
-  border-left: 1px solid var(--line);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  border-top: 1px solid var(--line);
   background: var(--panel);
   padding: 8px 10px;
   display: flex;

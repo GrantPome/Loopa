@@ -300,7 +300,7 @@ export type DeviceMode = 'pc' | 'pad'
 export type RegionId = 'left' | 'center' | 'bottom'
 
 /** 可自由编排位置的功能板块 */
-export type PanelId = 'tracks' | 'fx' | 'editor' | 'keyboard' | 'master'
+export type PanelId = 'tracks' | 'fx' | 'editor' | 'inspector' | 'keyboard' | 'master'
 
 /**
  * 可持久化的布局配置：

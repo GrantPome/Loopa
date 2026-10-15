@@ -20,6 +20,7 @@ export const PANEL_LABELS: Record<PanelId, string> = {
   tracks: '轨道',
   fx: '效果器',
   editor: '编辑区',
+  inspector: '音符检查器',
   keyboard: '虚拟键盘',
   master: '总输出'
 }
@@ -28,7 +29,7 @@ export const PANEL_LABELS: Record<PanelId, string> = {
 export const REGION_ORDER: RegionId[] = ['left', 'center', 'bottom']
 
 /** 全部板块（用于布局归一化兜底） */
-const ALL_PANELS: PanelId[] = ['tracks', 'fx', 'editor', 'keyboard', 'master']
+const ALL_PANELS: PanelId[] = ['tracks', 'fx', 'editor', 'inspector', 'keyboard', 'master']
 
 /** 区域尺寸约束 */
 export const LEFT_WIDTH_MIN = 200
@@ -50,17 +51,17 @@ const LAYOUT_KEY = 'muisc-editor:v1:layout'
 
 /**
  * 默认板块权重：
- * 左栏「轨道 / 效果器」等分；底部「虚拟键盘 : 总输出 = 3 : 1」，
+ * 左栏「轨道 / 效果器 / 音符检查器」等分；底部「虚拟键盘 : 总输出 = 3 : 1」，
  * 与旧版「总输出固定 232px」的观感基本一致。
  */
 export function defaultPanelWeight(): Record<PanelId, number> {
-  return { tracks: 1, fx: 1, editor: 1, keyboard: 3, master: 1 }
+  return { tracks: 1, fx: 1, editor: 1, inspector: 1, keyboard: 3, master: 1 }
 }
 
-/** 默认布局：与旧版三栏结构完全一致，保证升级后观感不变 */
+/** 默认布局：与旧版三栏结构基本一致，音符检查器作为独立板块挂在左栏底部 */
 export function defaultLayout(): LayoutConfig {
   return {
-    left: ['tracks', 'fx'],
+    left: ['tracks', 'fx', 'inspector'],
     center: ['editor'],
     bottom: ['keyboard', 'master'],
     leftWidth: 288,
