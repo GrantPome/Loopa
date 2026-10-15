@@ -2,7 +2,7 @@
 /**
  * 应用主页（启动欢迎页）
  * 还原 Premiere Pro 欢迎页布局：
- * - 左侧菜单：新建项目 / 打开项目，下方列表为团队项目与 Rush 项目入口（占位，即将推出）
+ * - 左侧菜单：新建项目 / 打开项目，下方列表为团队项目入口（占位，即将推出）
  * - 右侧主内容区：顶部大标题「欢迎使用 Premiere Pro」，中间为剪辑相关的简约线稿图标，
  *   线稿下方是「编辑、效果和导出」标语，右下角为蓝色「新文件」按钮
  * - 仅负责入口跳转：新建 / 新文件 → 新建工程并进入编辑器；打开项目 → 打开本地工程弹窗
@@ -13,8 +13,8 @@ import { state } from '@/core/store'
 
 const emit = defineEmits<{ (e: 'enter'): void; (e: 'new'): void; (e: 'history'): void }>()
 
-/** 左侧列表项：团队项目与 Rush 项目暂未开放，仅作占位展示 */
-const comingSoonItems = ['新建团队项目', '打开团队项目', '打开 Premiere Rush 项目']
+/** 左侧列表项：团队项目暂未开放，仅作占位展示 */
+const comingSoonItems = ['新建团队项目', '打开团队项目']
 
 /** 占位项点击：仅提示，不触发任何跳转 */
 function onComingSoon(): void {
