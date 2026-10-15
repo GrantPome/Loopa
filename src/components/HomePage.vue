@@ -89,8 +89,8 @@ function formatTime(timestamp: number): string {
         </nav>
       </aside>
 
-      <!-- 右侧主内容区 -->
-      <main class="main">
+      <!-- 右侧主内容区（打开项目视图时改为从顶部向下排布） -->
+      <main class="main" :class="{ projects: view === 'projects' }">
         <!-- 主页：欢迎插画 -->
         <template v-if="view === 'home'">
           <h1 class="title">欢迎使用 TonePome</h1>
@@ -276,6 +276,11 @@ function formatTime(timestamp: number): string {
   gap: 34px;
   padding: 36px 44px;
   overflow-y: auto;
+}
+
+/* 打开项目视图：列表从标题下方开始，自上而下排布，不垂直居中 */
+.main.projects {
+  justify-content: flex-start;
 }
 
 .title {
