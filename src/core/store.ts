@@ -1460,7 +1460,7 @@ export function pasteNotes(): number {
   return created.length
 }
 
-/** 再制选中音符：整组紧跟选区末尾平移一份 */
+/** 拷贝选中音符：整组紧跟选区末尾平移一份 */
 export function duplicateSelectedNotes(): number {
   const region = activeRegion()
   const notes = notesByIds(state.selectedNoteIds)
@@ -1477,7 +1477,7 @@ export function duplicateSelectedNotes(): number {
   }
   state.selectedNoteIds = created.map((n) => n.id)
   ensureBarsForBeat(maxEnd)
-  record(`再制 ${created.length} 个音符`)
+  record(`拷贝 ${created.length} 个音符`)
   commit()
   return created.length
 }

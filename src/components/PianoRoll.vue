@@ -2272,7 +2272,7 @@ watch(
       <button class="ctx-item" @click="menuCopy">复制</button>
       <button class="ctx-item" @click="menuCut">剪切</button>
       <button class="ctx-item" @click="menuPaste">粘贴</button>
-      <button class="ctx-item" @click="menuDuplicate">再制</button>
+      <button class="ctx-item" @click="menuDuplicate">拷贝</button>
       <div class="ctx-sep" />
       <button class="ctx-item" :disabled="state.selectedNoteIds.length === 0" @click="menuDelete">
         删除
