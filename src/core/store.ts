@@ -582,9 +582,12 @@ export function initStore(): void {
   const loaded = lastId ? storage.loadProject(lastId) : null
   if (loaded) {
     state.project = normalizeProject(loaded)
+    projectPersisted = true
   } else {
     state.project = createEmptyProject()
     seedDefaultTracks()
+    // 首次打开站点时的空白工程同样不落盘，有改动后再进入历史列表
+    projectPersisted = false
   }
   state.selectedTrackId = state.project.tracks[0]?.id ?? ''
   state.savedProjects = storage.readMetas()
@@ -713,6 +716,13 @@ function sampleLevels(): void {
 
 let syncRequestedAt = 0
 
+/**
+ * 当前工程是否已写入本地存储。
+ * 新建的工程在没有任何改动前不写入历史列表，避免主页出现一堆空白工程；
+ * 一旦发生可撤销的编辑（record）或用户手动保存，即置为 true。
+ */
+let projectPersisted = true
+
 /** 标记需要同步（实际同步在心跳循环里节流执行，不使用 setTimeout 计时） */
 export function commit(): void {
   state.revision += 1
@@ -726,6 +736,8 @@ export function commit(): void {
  */
 function record(label: string, coalesceKey = ''): void {
   recordChange(state.project, label, coalesceKey)
+  // 首次真实编辑：允许后续同步把工程写入历史列表
+  projectPersisted = true
 }
 
 /** 立即把当前工程同步到音频引擎并写入 localStorage */
@@ -735,12 +747,15 @@ function syncNow(): void {
   engine.updateAllMix(state.project)
   engine.setLoop(state.loopOn)
   state.project.updatedAt = Date.now()
+  // 新建且未改动过的工程不落盘，不进入历史列表
+  if (!projectPersisted) return
   storage.saveProject(state.project)
   state.savedProjects = storage.readMetas()
 }
 
-/** 仅做持久化（不需要重排音符的改动） */
+/** 仅做持久化（不需要重排音符的改动）；手动保存视为用户明确要保留该工程 */
 function persistOnly(): void {
+  projectPersisted = true
   state.project.updatedAt = Date.now()
   storage.saveProject(state.project)
   state.savedProjects = storage.readMetas()
@@ -2367,6 +2382,8 @@ export function newProject(): void {
   state.selectedClipId = ''
   state.view.scrollLeft = 0
   resetHistory(state.project)
+  // 新建工程先不落盘：用户未做任何改动就退出时，不出现在历史列表里
+  projectPersisted = false
   commit()
   applyProjectToEngine()
   syncNow()
@@ -2388,6 +2405,7 @@ export function loadProjectById(id: string): void {
   state.selectedClipId = ''
   state.view.scrollLeft = 0
   resetHistory(project)
+  projectPersisted = true
   applyProjectToEngine()
   commit()
   syncNow()
@@ -2422,6 +2440,7 @@ export async function importProjectJson(file: File): Promise<void> {
     state.selectedClipId = ''
     state.view.scrollLeft = 0
     resetHistory(project)
+    projectPersisted = true
     applyProjectToEngine()
     commit()
     syncNow()

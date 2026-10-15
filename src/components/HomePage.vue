@@ -142,7 +142,15 @@ function formatTime(timestamp: number): string {
                 <div class="project-meta">{{ formatTime(item.updatedAt) }}</div>
               </div>
               <button class="load-btn" @click="onLoadProject(item.id)">打开</button>
-              <button class="delete-btn" title="删除该工程" @click="onDeleteProject(item.id)">删除</button>
+              <button class="delete-btn" title="删除该工程" @click="onDeleteProject(item.id)">
+                <!-- 垃圾桶图标 -->
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M2 4h12" />
+                  <path d="M5.5 4V2.5h5V4" />
+                  <path d="M3.5 4l.8 9.2a1 1 0 0 0 1 .8h5.4a1 1 0 0 0 1-.8L12.5 4" />
+                  <path d="M6.5 6.8v4.4M9.5 6.8v4.4" />
+                </svg>
+              </button>
             </div>
 
             <p v-if="!state.savedProjects.length" class="empty">还没有保存过的工程</p>
@@ -354,6 +362,17 @@ function formatTime(timestamp: number): string {
 .load-btn {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* 删除按钮：图标按钮，正方形居中 */
+.delete-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--text-dim);
 }
 
 .delete-btn:hover:not(:disabled) {
