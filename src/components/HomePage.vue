@@ -58,9 +58,9 @@ function formatTime(timestamp: number): string {
       <aside class="menu">
         <div class="app-name">TonePome</div>
 
-        <!-- 主页选项：右侧显示欢迎插画 -->
+        <!-- 主页选项：右侧显示欢迎插画（与新建/打开项目同为菜单按钮样式） -->
         <button
-          class="menu-item"
+          class="menu-btn"
           :class="{ active: view === 'home' }"
           @click="view = 'home'"
         >
@@ -255,12 +255,6 @@ function formatTime(timestamp: number): string {
 .menu-item:hover:not(:disabled) {
   color: var(--text);
   background: var(--panel-3);
-}
-
-/* 主页选项的选中态 */
-.menu-item.active {
-  color: var(--accent);
-  background: var(--accent-soft);
 }
 
 /* ---------------------------------------------------------------- 右侧主内容区 */
