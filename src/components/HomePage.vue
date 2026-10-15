@@ -20,7 +20,10 @@ type HomeView = 'home' | 'projects' | 'about'
 const view = ref<HomeView>('home')
 
 /** 左侧列表项：团队项目暂未开放，仅作占位展示 */
-const comingSoonItems = ['新建团队项目', '打开团队项目']
+const comingSoonItems = [
+  { label: '新建团队项目', icon: 'users' },
+  { label: '打开团队项目', icon: 'folder-users' }
+] as const
 
 /**
  * 更新日志：按发布日期倒序，内容整理自真实提交历史
@@ -125,27 +128,56 @@ function formatTime(timestamp: number): string {
           :class="{ active: view === 'home' }"
           @click="view = 'home'"
         >
+          <!-- 主页图标 -->
+          <svg class="mi" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2.5 7L8 2.5 13.5 7" />
+            <path d="M4 6.5V13.5h8V6.5" />
+            <path d="M6.5 13.5v-4h3v4" />
+          </svg>
           主页
         </button>
 
-        <button class="menu-btn" @click="emit('new')">新建项目</button>
+        <button class="menu-btn" @click="emit('new')">
+          <!-- 新建图标 -->
+          <svg class="mi" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 3v10M3 8h10" />
+          </svg>
+          新建项目
+        </button>
         <button
           class="menu-btn"
           :class="{ active: view === 'projects' }"
           @click="onOpenProjects"
         >
+          <!-- 打开文件夹图标 -->
+          <svg class="mi" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3L8 4.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z" />
+            <path d="M2 7h12" opacity="0.5" />
+          </svg>
           打开项目
         </button>
 
         <nav class="menu-list">
           <button
             v-for="item in comingSoonItems"
-            :key="item"
+            :key="item.label"
             class="menu-item"
-            :title="`${item}（即将推出）`"
+            :title="`${item.label}（即将推出）`"
             @click="onComingSoon"
           >
-            {{ item }}
+            <!-- 新建团队项目：双人图标 -->
+            <svg v-if="item.icon === 'users'" class="mi" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="6" cy="5.5" r="2.2" />
+              <path d="M2 13c.6-2.2 2.2-3.3 4-3.3s3.4 1.1 4 3.3" />
+              <path d="M10.5 3.9a2.2 2.2 0 0 1 0 3.2M12 9.9c1 .5 1.7 1.5 2 3.1" />
+            </svg>
+            <!-- 打开团队项目：文件夹+人图标 -->
+            <svg v-else class="mi" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3L8 4.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z" />
+              <circle cx="8" cy="8.2" r="1.2" />
+              <path d="M6 11.5c.4-1 1.2-1.5 2-1.5s1.6.5 2 1.5" />
+            </svg>
+            {{ item.label }}
           </button>
         </nav>
 
@@ -155,6 +187,12 @@ function formatTime(timestamp: number): string {
           :class="{ active: view === 'about' }"
           @click="view = 'about'"
         >
+          <!-- 信息图标 -->
+          <svg class="mi" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="8" cy="8" r="6" />
+            <path d="M8 7.2v3.6" />
+            <circle cx="8" cy="5" r="0.4" fill="currentColor" stroke="none" />
+          </svg>
           关于
         </button>
       </aside>
@@ -326,6 +364,9 @@ function formatTime(timestamp: number): string {
 
 /* 菜单主按钮：深灰底白字，整宽，PR 菜单观感 */
 .menu-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: 100%;
   padding: 12px 14px;
   font-size: 13px;
@@ -334,6 +375,14 @@ function formatTime(timestamp: number): string {
   background: var(--panel-3);
   border: 1px solid var(--line);
   border-radius: 4px;
+}
+
+/* 菜单项图标：描边风格，与线稿插画一致 */
+.mi {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  opacity: 0.85;
 }
 
 .menu-btn:hover:not(:disabled) {
@@ -357,6 +406,9 @@ function formatTime(timestamp: number): string {
 
 /* 列表项：纯文字菜单，悬停高亮 */
 .menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   padding: 9px 10px;
   font-size: 12.5px;
   text-align: left;
