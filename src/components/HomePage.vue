@@ -1,24 +1,52 @@
 <script setup lang="ts">
 /**
  * 应用主页（启动欢迎页）
- * 还原 Premiere Pro 欢迎页布局：
- * - 左侧菜单：新建项目 / 打开项目，下方列表为团队项目入口（占位，即将推出）
- * - 右侧主内容区：顶部大标题「欢迎使用 Premiere Pro」，中间为剪辑相关的简约线稿图标，
- *   线稿下方是「编辑、效果和导出」标语，右下角为蓝色「新文件」按钮
- * - 仅负责入口跳转：新建 / 新文件 → 新建工程并进入编辑器；打开项目 → 打开本地工程弹窗
+ * Premiere Pro 风格欢迎页布局：
+ * - 左侧菜单：主页 / 新建项目 / 打开项目，下方列表为团队项目入口（占位，即将推出）
+ * - 右侧主内容区：
+ *   - 主页：顶部大标题「欢迎使用 TonePome」，中间为音乐制作相关的简约线稿图标
+ *     （钢琴键 / 音符 / 波形），下方是「编辑、效果和导出」标语
+ *   - 打开项目：右侧直接展示最近保存的工程列表，可加载 / 删除，不再使用弹窗
+ * - 仅负责入口跳转：新建 → 新建工程并进入编辑器；加载工程 → 载入后进入编辑器
  * 复用项目现有主题令牌（--bg / --panel / --accent），深色暗色 UI，PC / 移动端自适应。
  */
-
-import { state } from '@/core/store'
+import { ref } from 'vue'
+import { deleteSavedProject, loadProjectById, state } from '@/core/store'
 
 const emit = defineEmits<{ (e: 'enter'): void; (e: 'new'): void; (e: 'history'): void }>()
+
+/** 右侧主内容区视图：主页插画 / 最近项目列表 */
+type HomeView = 'home' | 'projects'
+const view = ref<HomeView>('home')
 
 /** 左侧列表项：团队项目暂未开放，仅作占位展示 */
 const comingSoonItems = ['新建团队项目', '打开团队项目']
 
 /** 占位项点击：仅提示，不触发任何跳转 */
 function onComingSoon(): void {
-  state.statusText = '团队项目与 Rush 项目即将推出'
+  state.statusText = '团队项目即将推出'
+}
+
+/** 打开项目：右侧切换到最近项目列表 */
+function onOpenProjects(): void {
+  view.value = 'projects'
+}
+
+/** 加载最近项目并进入编辑器 */
+function onLoadProject(id: string): void {
+  loadProjectById(id)
+  emit('enter')
+}
+
+function onDeleteProject(id: string): void {
+  deleteSavedProject(id)
+}
+
+/** 工程时间格式：YYYY-MM-DD HH:mm */
+function formatTime(timestamp: number): string {
+  const d = new Date(timestamp)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 </script>
 
@@ -30,8 +58,23 @@ function onComingSoon(): void {
       <aside class="menu">
         <div class="app-name">TonePome</div>
 
+        <!-- 主页选项：右侧显示欢迎插画 -->
+        <button
+          class="menu-item"
+          :class="{ active: view === 'home' }"
+          @click="view = 'home'"
+        >
+          主页
+        </button>
+
         <button class="menu-btn" @click="emit('new')">新建项目</button>
-        <button class="menu-btn" @click="emit('history')">打开项目</button>
+        <button
+          class="menu-btn"
+          :class="{ active: view === 'projects' }"
+          @click="onOpenProjects"
+        >
+          打开项目
+        </button>
 
         <nav class="menu-list">
           <button
@@ -48,36 +91,63 @@ function onComingSoon(): void {
 
       <!-- 右侧主内容区 -->
       <main class="main">
-        <h1 class="title">欢迎使用 TonePome</h1>
+        <!-- 主页：欢迎插画 -->
+        <template v-if="view === 'home'">
+          <h1 class="title">欢迎使用 TonePome</h1>
 
-        <!-- 简约线稿图标：摄像机 / 素材 / 播放箭头 -->
-        <div class="art">
-          <!-- 摄像机 -->
-          <svg class="art-icon" viewBox="0 0 120 120" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="14" y="40" width="58" height="42" rx="6" />
-            <path d="M72 52l30-12v44l-30-12" />
-            <circle cx="30" cy="52" r="4" />
-            <path d="M20 34c8-8 22-10 32-4" opacity="0.5" />
-          </svg>
-          <!-- 素材（胶片） -->
-          <svg class="art-icon" viewBox="0 0 120 120" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="20" y="30" width="80" height="60" rx="5" />
-            <path d="M20 46h80M20 74h80" />
-            <path d="M38 30v16M56 30v16M74 30v16M38 74v16M56 74v16M74 74v16" opacity="0.6" />
-            <path d="M30 60h60" opacity="0.35" />
-          </svg>
-          <!-- 播放箭头 -->
-          <svg class="art-icon" viewBox="0 0 120 120" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M60 16c24 0 44 20 44 44s-20 44-44 44-44-20-44-44 20-44 44-44z" opacity="0.6" />
-            <path d="M50 42l30 18-30 18z" />
-            <path d="M30 26c6-4 12-6 18-7" opacity="0.35" />
-          </svg>
-        </div>
+          <!-- 简约线稿图标：钢琴键 / 音符 / 波形 -->
+          <div class="art">
+            <!-- 钢琴键 -->
+            <svg class="art-icon" viewBox="0 0 120 120" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="14" y="32" width="92" height="58" rx="6" />
+              <path d="M37 32v58M60 32v58M83 32v58" opacity="0.6" />
+              <path d="M30 32v32M49 32v32M72 32v32M95 32v32" stroke-width="7" />
+              <path d="M20 26c10-8 24-10 36-5" opacity="0.35" />
+            </svg>
+            <!-- 八分音符 -->
+            <svg class="art-icon" viewBox="0 0 120 120" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M46 30l42 8" />
+              <path d="M46 40l42 8" opacity="0.6" />
+              <path d="M46 30v42M88 38v42" />
+              <ellipse cx="38" cy="76" rx="9" ry="6.5" transform="rotate(-16 38 76)" />
+              <ellipse cx="80" cy="84" rx="9" ry="6.5" transform="rotate(-16 80 84)" />
+              <path d="M96 22c4 2 7 5 8 9" opacity="0.35" />
+            </svg>
+            <!-- 音频波形 -->
+            <svg class="art-icon" viewBox="0 0 120 120" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 66V54M30 74V46M42 82V38M54 94V28M66 80V40M78 94V26M90 72V48M102 62V58" stroke-width="4" />
+              <path d="M14 34c8-6 18-8 26-5" opacity="0.35" />
+            </svg>
+          </div>
 
-        <p class="slogan">编辑、效果和导出</p>
+          <p class="slogan">编曲、混音和导出</p>
+        </template>
 
-        <!-- 右下角：新文件 -->
-        <button class="new-file" @click="emit('new')">新文件</button>
+        <!-- 打开项目：最近项目列表 -->
+        <template v-else>
+          <h1 class="title">打开项目</h1>
+
+          <div class="project-list">
+            <div
+              v-for="item in state.savedProjects"
+              :key="item.id"
+              class="project-item"
+              :class="{ current: item.id === state.project.id }"
+            >
+              <div class="project-info">
+                <div class="project-name">{{ item.name }}</div>
+                <div class="project-meta">
+                  {{ item.bpm }} BPM · {{ item.timeSignature }} · {{ item.trackCount }} 轨 · {{ item.noteCount }} 音符
+                </div>
+                <div class="project-meta">{{ formatTime(item.updatedAt) }}</div>
+              </div>
+              <button class="load-btn" @click="onLoadProject(item.id)">打开</button>
+              <button class="delete-btn" title="删除该工程" @click="onDeleteProject(item.id)">删除</button>
+            </div>
+
+            <p v-if="!state.savedProjects.length" class="empty">还没有保存过的工程</p>
+          </div>
+        </template>
       </main>
     </div>
   </div>
@@ -157,6 +227,12 @@ function onComingSoon(): void {
   border-color: var(--line-strong);
 }
 
+/* 当前视图对应的菜单按钮高亮 */
+.menu-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .menu-list {
   display: flex;
   flex-direction: column;
@@ -181,6 +257,12 @@ function onComingSoon(): void {
   background: var(--panel-3);
 }
 
+/* 主页选项的选中态 */
+.menu-item.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
 /* ---------------------------------------------------------------- 右侧主内容区 */
 
 .main {
@@ -193,6 +275,7 @@ function onComingSoon(): void {
   justify-content: center;
   gap: 34px;
   padding: 36px 44px;
+  overflow-y: auto;
 }
 
 .title {
@@ -227,24 +310,62 @@ function onComingSoon(): void {
   color: var(--text-dim);
 }
 
-/* 右下角蓝色「新文件」按钮 */
-.new-file {
-  position: absolute;
-  right: 28px;
-  bottom: 24px;
-  padding: 10px 26px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #fff;
-  background: var(--accent);
-  border: none;
-  border-radius: 4px;
-  box-shadow: 0 2px 12px rgba(79, 157, 247, 0.35);
+/* ---------------------------------------------------------------- 最近项目列表 */
+
+.project-list {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 56px;
 }
 
-.new-file:hover:not(:disabled) {
-  background: #6ab4ff;
-  box-shadow: 0 4px 18px rgba(79, 157, 247, 0.45);
+.project-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.project-item.current {
+  border-color: var(--accent);
+}
+
+.project-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.project-name {
+  font-weight: 600;
+  margin-bottom: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-meta {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.load-btn {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.delete-btn:hover:not(:disabled) {
+  color: var(--accent-2);
+  border-color: var(--accent-2);
+}
+
+.empty {
+  color: var(--text-dim);
+  text-align: center;
+  padding: 40px 20px;
 }
 
 /* ---------------------------------------------------------------- 移动端适配 */
@@ -279,7 +400,8 @@ function onComingSoon(): void {
 
   .main {
     gap: 24px;
-    padding: 64px 20px 84px;
+    padding: 64px 20px 28px;
+    overflow: visible;
   }
 
   .title {
@@ -300,6 +422,10 @@ function onComingSoon(): void {
   .slogan {
     font-size: 13px;
     letter-spacing: 2px;
+  }
+
+  .project-list {
+    margin-top: 24px;
   }
 }
 
