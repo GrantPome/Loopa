@@ -4,7 +4,7 @@
  * 横向滚动与钢琴卷帘联动（共享 state.view）
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { selectAudioClip, state, seek } from '@/core/store'
+import { duplicateClip, removeClip, resizeClip, selectAudioClip, splitClip, state, seek } from '@/core/store'
 import { beatsPerBarOf, clamp } from '@/utils/music'
 import { hexToRgba } from '@/utils/color'
 import { peakRange } from '@/utils/waveform'
@@ -182,8 +182,8 @@ function beatAtEvent(event: MouseEvent): number {
   return Math.max(0, (event.clientX - rect.left) / state.view.pxPerBeat)
 }
 
-/** 命中测试：判断点击落在哪条音频轨的哪个波形片段上 */
-function clipAt(event: PointerEvent): { trackId: string; clipId: string } | null {
+/** 命中测试：判断点击落在哪条音频轨的哪个波形片段上，并区分边缘修剪区 */
+function clipAt(event: PointerEvent | MouseEvent): { trackId: string; clipId: string; edge: 'left' | 'right' | 'body' } | null {
   const canvas = canvasEl.value
   if (!canvas) return null
   const rect = canvas.getBoundingClientRect()
@@ -193,26 +193,100 @@ function clipAt(event: PointerEvent): { trackId: string; clipId: string } | null
   if (!track || track.kind !== 'audio') return null
   const beat = Math.max(0, (event.clientX - rect.left) / state.view.pxPerBeat)
   const clip = track.clips.find((c) => beat >= c.start && beat <= c.start + c.duration)
-  return clip ? { trackId: track.id, clipId: clip.id } : null
+  if (!clip) return null
+  // 左右各 6px 为修剪手柄热区
+  const edgeBeats = 6 / state.view.pxPerBeat
+  const edge =
+    beat - clip.start <= edgeBeats ? 'left' : clip.start + clip.duration - beat <= edgeBeats ? 'right' : 'body'
+  return { trackId: track.id, clipId: clip.id, edge }
 }
+
+/** 当前正在修剪的片段与手柄 */
+let trimming: { trackId: string; clipId: string; edge: 'left' | 'right' } | null = null
+/** 右键菜单状态（屏幕坐标） */
+const clipMenu = ref<{ x: number; y: number; trackId: string; clipId: string; canSplit: boolean } | null>(null)
 
 function onPointerDown(event: PointerEvent): void {
   if (event.button !== 0) return
-  // 点到波形片段上时先选中该片段，再照常定位播放头
+  clipMenu.value = null
   const hit = clipAt(event)
   if (hit) selectAudioClip(hit.trackId, hit.clipId)
+  // 点到片段边缘：进入修剪模式，不移动播放头
+  if (hit && hit.edge !== 'body') {
+    trimming = { trackId: hit.trackId, clipId: hit.clipId, edge: hit.edge }
+    ;(event.target as HTMLElement).setPointerCapture(event.pointerId)
+    return
+  }
   dragging = true
   ;(event.target as HTMLElement).setPointerCapture(event.pointerId)
   seek(beatAtEvent(event))
 }
 
 function onPointerMove(event: PointerEvent): void {
+  const canvas = canvasEl.value
+  // 修剪中：根据手柄方向改写片段起止
+  if (trimming) {
+    const track = state.project.tracks.find((t) => t.id === trimming!.trackId)
+    const clip = track?.clips.find((c) => c.id === trimming!.clipId)
+    if (!track || !clip) return
+    const spb = 60 / state.project.bpm
+    const beat = beatAtEvent(event)
+    if (trimming.edge === 'left') {
+      // 从头部裁剪：右端不动，起点与源内偏移同步后移
+      const nextStart = clamp(beat, 0, clip.start + clip.duration - 0.125)
+      resizeClip(track.id, clip.id, {
+        start: nextStart,
+        offset: clip.offset + (nextStart - clip.start) * spb,
+        duration: clip.duration - (nextStart - clip.start)
+      })
+    } else {
+      // 从尾部裁剪：只改时长
+      resizeClip(track.id, clip.id, { duration: Math.max(0.125, beat - clip.start) })
+    }
+    return
+  }
+  // 悬停反馈：靠近片段边缘时显示左右箭头
+  if (!dragging && canvas) {
+    const hit = clipAt(event)
+    canvas.style.cursor = hit && hit.edge !== 'body' ? 'ew-resize' : ''
+  }
   if (!dragging) return
   seek(beatAtEvent(event))
 }
 
 function onPointerUp(): void {
   dragging = false
+  trimming = null
+}
+
+/** 右键：在波形片段上弹出操作菜单 */
+function onContextMenu(event: MouseEvent): void {
+  const hit = clipAt(event)
+  if (!hit) return
+  event.preventDefault()
+  selectAudioClip(hit.trackId, hit.clipId)
+  const clip = state.project.tracks.find((t) => t.id === hit.trackId)?.clips.find((c) => c.id === hit.clipId)
+  // 仅当播放头落在片段内部时允许「在播放头处分割」
+  const canSplit = !!clip && state.playheadBeats > clip.start && state.playheadBeats < clip.start + clip.duration
+  clipMenu.value = { x: event.clientX, y: event.clientY, trackId: hit.trackId, clipId: hit.clipId, canSplit }
+}
+
+function onMenuSplit(): void {
+  const m = clipMenu.value
+  if (m) splitClip(m.trackId, m.clipId, state.playheadBeats)
+  clipMenu.value = null
+}
+
+function onMenuDuplicate(): void {
+  const m = clipMenu.value
+  if (m) duplicateClip(m.trackId, m.clipId)
+  clipMenu.value = null
+}
+
+function onMenuDelete(): void {
+  const m = clipMenu.value
+  if (m) removeClip(m.trackId, m.clipId)
+  clipMenu.value = null
 }
 
 function onWheel(event: WheelEvent): void {
@@ -276,10 +350,23 @@ watch(
           @pointerdown="onPointerDown"
           @pointermove="onPointerMove"
           @pointerup="onPointerUp"
+          @pointercancel="onPointerUp"
+          @contextmenu="onContextMenu"
           @wheel="onWheel"
         />
       </div>
     </div>
+
+    <!-- 波形片段右键菜单（fixed 定位，坐标即指针位置） -->
+    <Teleport to="body">
+      <div v-if="clipMenu" class="clip-menu-mask" @pointerdown="clipMenu = null" @contextmenu.prevent="clipMenu = null">
+        <div class="clip-menu" :style="{ left: clipMenu.x + 'px', top: clipMenu.y + 'px' }" @pointerdown.stop>
+          <button :disabled="!clipMenu.canSplit" @click="onMenuSplit">在播放头处分割</button>
+          <button @click="onMenuDuplicate">再制</button>
+          <button class="danger" @click="onMenuDelete">删除</button>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -314,5 +401,47 @@ watch(
 canvas {
   display: block;
   cursor: pointer;
+}
+
+/* 右键菜单遮罩：点击任意处关闭 */
+.clip-menu-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 600;
+}
+
+.clip-menu {
+  position: fixed;
+  min-width: 140px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.clip-menu button {
+  padding: 6px 10px;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+}
+
+.clip-menu button:hover:not(:disabled) {
+  background: var(--panel-3);
+}
+
+.clip-menu button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.clip-menu .danger:hover {
+  color: var(--accent-2);
 }
 </style>
