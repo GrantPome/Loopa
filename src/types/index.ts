@@ -525,6 +525,19 @@ export interface Track {
   automation: AutomationLane[]
 }
 
+/**
+ * 时间轴标记点（标点）：
+ * 用户在时间轴上打下的位置锚点，用于快速跳转（上一个 / 下一个），
+ * 也可由「自动卡点」从音频波形检测出的重音批量生成。
+ */
+export interface TimelineMarker {
+  id: string
+  /** 位置（拍） */
+  beat: number
+  /** 显示名；自动卡点生成时为「卡点 N」 */
+  label: string
+}
+
 /** 工程（可序列化为 JSON 存 localStorage / 导出文件） */
 export interface Project {
   id: string
@@ -545,6 +558,8 @@ export interface Project {
   customInstruments: CustomInstrument[]
   /** 音阶设置：音阶锁定开启时，写谱与拖动音符都会吸附到该音阶 */
   scale: ScaleSetting
+  /** 时间轴标记点（标点 / 卡点），按位置升序存放 */
+  markers: TimelineMarker[]
   createdAt: number
   updatedAt: number
 }

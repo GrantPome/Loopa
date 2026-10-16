@@ -8,7 +8,12 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   state,
   historyUi,
+  addMarker,
+  clearMarkers,
+  detectMarkers,
+  gotoMarker,
   newProject,
+  renameMarker,
   saveProjectNow,
   exportProjectJson,
   importProjectJson,
@@ -41,7 +46,7 @@ const jsonInput = ref<HTMLInputElement | null>(null)
 const midiInput = ref<HTMLInputElement | null>(null)
 // ---------------------------------------------------------------- 文件 / 导出下拉菜单
 
-type MenuKey = 'file' | 'export'
+type MenuKey = 'file' | 'export' | 'markers'
 
 interface MenuItem {
   label: string
@@ -109,8 +114,64 @@ const menus = computed<MenuDef[]>(() => [
         disabled: state.busy
       }
     ]
+  },
+  {
+    key: 'markers',
+    label: markerLabel.value,
+    title: '时间轴标记点：标点与卡点',
+    items: [
+      { label: '打点', desc: '在播放头位置放一个标记点（快捷键 M）', action: () => addMarker() },
+      {
+        label: '自动卡点',
+        desc: '分析音频波形重音，批量生成标记点',
+        action: () => detectMarkers(),
+        disabled: !hasAudioClips.value
+      },
+      {
+        label: '上一个标记点',
+        desc: '跳到当前位置之前的标记点',
+        action: () => gotoMarker(-1),
+        disabled: !markerCount.value
+      },
+      {
+        label: '下一个标记点',
+        desc: '跳到当前位置之后的标记点',
+        action: () => gotoMarker(1),
+        disabled: !markerCount.value
+      },
+      {
+        label: '重命名选中标记',
+        desc: '给当前选中的标记点改名',
+        action: renameSelectedMarker,
+        disabled: !state.selectedMarkerId
+      },
+      {
+        label: '清空全部标记点',
+        desc: '删除本工程的所有标记点',
+        action: clearMarkers,
+        disabled: !markerCount.value
+      }
+    ]
   }
 ])
+
+/** 标记点数量（用于菜单项禁用态与触发器上的计数） */
+const markerCount = computed(() => state.project.markers.length)
+/** 触发器文字：有标记时带上数量，方便一眼看出打了几个点 */
+const markerLabel = computed(() => (markerCount.value ? `标记 ${markerCount.value}` : '标记'))
+/** 只有工程里存在音频片段时才允许「自动卡点」 */
+const hasAudioClips = computed(() => state.project.tracks.some((t) => t.clips.length > 0))
+
+/** 重命名当前选中的标记点 */
+function renameSelectedMarker(): void {
+  const marker = state.project.markers.find((m) => m.id === state.selectedMarkerId)
+  if (!marker) {
+    state.statusText = '请先在标尺上点选一个标记点'
+    return
+  }
+  const next = window.prompt('标记点名称', marker.label)
+  if (next !== null) renameMarker(marker.id, next)
+}
 
 // ---------------------------------------------------------------- 视图切换（分段 Tab）
 

@@ -19,6 +19,7 @@ import type {
   ScaleSetting,
   ScaleType,
   TimeSignature,
+  TimelineMarker,
   Track,
   TrackEffect,
   TrackKind,
@@ -104,6 +105,8 @@ export interface AppState {
   selectedNoteIds: string[]
   /** 当前选中的音频片段 id（波形编辑器使用） */
   selectedClipId: string
+  /** 当前选中的标记点 id（时间轴标记使用） */
+  selectedMarkerId: string
   isPlaying: boolean
   /** 预备拍进行中 */
   isCountingIn: boolean
@@ -165,6 +168,9 @@ export interface AppState {
 
 // ---------------------------------------------------------------- 工厂函数
 
+/** 时间轴标记点上限：过多会拖慢时间轴绘制，同时也是「自动卡点」批量生成的上限 */
+export const MAX_MARKERS = 500
+
 export function createEmptyProject(name = '未命名工程'): Project {
   const now = Date.now()
   return {
@@ -180,6 +186,7 @@ export function createEmptyProject(name = '未命名工程'): Project {
     customInstruments: [],
     // 默认不锁定音阶（十二平均律），由用户在钢琴卷帘里显式开启
     scale: { root: 48, type: 'chromatic' },
+    markers: [],
     createdAt: now,
     updatedAt: now
   }
@@ -448,6 +455,7 @@ export function normalizeProject(raw: Partial<Project>, fallbackName = '未命�
     tracks,
     customInstruments,
     scale: normalizeScale(raw.scale),
+    markers: normalizeMarkers(raw.markers),
     createdAt: raw.createdAt ?? base.createdAt,
     updatedAt: raw.updatedAt ?? base.updatedAt
   }
@@ -458,6 +466,28 @@ function normalizeScale(raw: unknown): ScaleSetting {
   const item = raw as Partial<ScaleSetting> | undefined
   const type = item?.type && SCALE_DEF_MAP[item.type] ? (item.type as ScaleType) : 'chromatic'
   return { root: clamp(Math.round(Number(item?.root ?? 48) || 48), 48, 59), type }
+}
+
+/**
+ * 标记点归一化：
+ * 旧工程没有 markers 字段，这里统一补空数组；
+ * 同时过滤非法项、修正浮点、按位置升序排列并限流。
+ */
+function normalizeMarkers(raw: unknown): TimelineMarker[] {
+  if (!Array.isArray(raw)) return []
+  const list: TimelineMarker[] = []
+  for (const item of raw) {
+    const m = item as Partial<TimelineMarker> | undefined
+    const beat = Number(m?.beat)
+    if (!Number.isFinite(beat)) continue
+    list.push({
+      id: typeof m?.id === 'string' && m.id ? m.id : uid('mk'),
+      beat: Math.max(0, roundBeat(beat)),
+      label: typeof m?.label === 'string' && m.label ? m.label : '标记'
+    })
+  }
+  list.sort((a, b) => a.beat - b.beat)
+  return list.slice(0, MAX_MARKERS)
 }
 
 // ---------------------------------------------------------------- 界面偏好持久化
@@ -537,6 +567,7 @@ export const state = reactive<AppState>({
   selectedTrackId: '',
   selectedNoteIds: [],
   selectedClipId: '',
+  selectedMarkerId: '',
   isPlaying: false,
   isCountingIn: false,
   recording: false,
@@ -2330,6 +2361,216 @@ export function seek(beats: number): void {
   state.playheadBeats = engine.getBeats()
 }
 
+// ---------------------------------------------------------------- 时间轴标记点（标点 / 卡点）
+
+/** 添加标记点（默认打在播放头位置），label 为空时自动编号 */
+export function addMarker(beat = state.playheadBeats, label = ''): void {
+  const safeBeat = Math.max(0, roundBeat(beat))
+  // 同一位置已有标记时不重复添加
+  if (state.project.markers.some((m) => Math.abs(m.beat - safeBeat) < 0.001)) {
+    state.statusText = '该位置已有标记点'
+    return
+  }
+  if (state.project.markers.length >= MAX_MARKERS) {
+    state.statusText = `标记点已达上限（${MAX_MARKERS} 个）`
+    return
+  }
+  const marker: TimelineMarker = {
+    id: uid('mk'),
+    beat: safeBeat,
+    label: label || `标记 ${state.project.markers.length + 1}`
+  }
+  state.project.markers.push(marker)
+  state.project.markers.sort((a, b) => a.beat - b.beat)
+  state.selectedMarkerId = marker.id
+  ensureBarsForBeat(safeBeat)
+  record('添加标记点')
+  commit()
+  state.statusText = `已添加标记点：第 ${safeBeat.toFixed(2)} 拍`
+}
+
+/** 删除标记点 */
+export function removeMarker(id: string): void {
+  const index = state.project.markers.findIndex((m) => m.id === id)
+  if (index < 0) return
+  state.project.markers.splice(index, 1)
+  if (state.selectedMarkerId === id) state.selectedMarkerId = ''
+  record('删除标记点')
+  commit()
+  state.statusText = '已删除标记点'
+}
+
+/** 移动标记点（拖拽过程中用同一个 coalesceKey 合并成一步） */
+export function moveMarker(id: string, beat: number): void {
+  const marker = state.project.markers.find((m) => m.id === id)
+  if (!marker) return
+  const safeBeat = Math.max(0, roundBeat(beat))
+  if (Math.abs(marker.beat - safeBeat) < 0.001) return
+  marker.beat = safeBeat
+  // 位置变化会打乱顺序，重新排序保证按拍递增
+  state.project.markers.sort((a, b) => a.beat - b.beat)
+  ensureBarsForBeat(safeBeat)
+  record('移动标记点', `marker:${id}:move`)
+  commit()
+}
+
+/** 重命名标记点 */
+export function renameMarker(id: string, label: string): void {
+  const marker = state.project.markers.find((m) => m.id === id)
+  if (!marker) return
+  const next = label.trim()
+  if (!next || next === marker.label) return
+  marker.label = next
+  record('重命名标记点')
+  commit()
+}
+
+/** 清空全部标记点 */
+export function clearMarkers(): void {
+  const count = state.project.markers.length
+  if (!count) return
+  state.project.markers = []
+  state.selectedMarkerId = ''
+  record('清空标记点')
+  commit()
+  state.statusText = `已清空 ${count} 个标记点`
+}
+
+/** 跳转到指定标记点 */
+export function seekMarker(id: string): void {
+  const marker = state.project.markers.find((m) => m.id === id)
+  if (!marker) return
+  state.selectedMarkerId = id
+  seek(marker.beat)
+}
+
+/** 跳到上一个 / 下一个标记点（dir = -1 / 1），到端点时回绕 */
+export function gotoMarker(dir: 1 | -1): void {
+  const list = state.project.markers
+  if (!list.length) {
+    state.statusText = '当前工程还没有标记点'
+    return
+  }
+  const current = state.playheadBeats
+  // 留一点容差，避免刚好停在标记点上时反复跳到自身
+  const eps = 0.01
+  const before = list.filter((m) => m.beat < current - eps)
+  const after = list.filter((m) => m.beat > current + eps)
+  const target = dir === 1 ? after[0] ?? list[0] : before[before.length - 1] ?? list[list.length - 1]
+  seekMarker(target.id)
+}
+
+/**
+ * 自动卡点：从音频轨的波形峰值里检测重音位置，批量生成标记点。
+ *
+ * 采用「能量包络 + 正向差分」的轻量 onset 检测，不依赖任何外部库：
+ *   1. 把每个片段的降采样峰值取绝对值，得到能量包络；
+ *   2. 求相邻帧的正向差分（起音瞬间能量骤增 → 出现正峰值）；
+ *   3. 用自适应阈值（均值 × 系数）过滤，并做最小时间间隔限制，避免密集误检；
+ *   4. 把源音频内的秒数换算成工程时间轴上的拍数。
+ * 结果只是数据，不影响播放与导出，可随时撤销。
+ *
+ * @param thresholdScale 阈值系数，越大越严格（默认 1.4）
+ * @param minGapSeconds  两个卡点之间的最小间隔（秒，默认 0.18）
+ * @returns 本次新增的标记点数量
+ */
+export function detectMarkers(thresholdScale = 1.4, minGapSeconds = 0.18): number {
+  const spb = secondsPerBeat()
+  const found: number[] = []
+  for (const track of state.project.tracks) {
+    for (const clip of track.clips) collectOnsets(clip, spb, thresholdScale, minGapSeconds, found)
+  }
+  if (!found.length) {
+    state.statusText = '没有检测到明显的重音，换个音频片段再试'
+    return 0
+  }
+  // 合并去重：跨轨道的同一位置只保留一个，并限制最小间隔
+  found.sort((a, b) => a - b)
+  const unique: number[] = []
+  const minGapBeats = minGapSeconds / spb
+  for (const beat of found) {
+    const last = unique[unique.length - 1]
+    if (last !== undefined && beat - last < minGapBeats) continue
+    unique.push(beat)
+  }
+  // 已有标记点的位置跳过，并受总量上限约束
+  const room = Math.max(0, MAX_MARKERS - state.project.markers.length)
+  const accepted = unique
+    .filter((beat) => !state.project.markers.some((m) => Math.abs(m.beat - beat) < 0.02))
+    .slice(0, room)
+  if (!accepted.length) {
+    state.statusText = '检测到的卡点都已存在'
+    return 0
+  }
+  for (const beat of accepted) {
+    state.project.markers.push({
+      id: uid('mk'),
+      beat,
+      label: `卡点 ${state.project.markers.length + 1}`
+    })
+  }
+  state.project.markers.sort((a, b) => a.beat - b.beat)
+  const lastMarker = state.project.markers[state.project.markers.length - 1]
+  if (lastMarker) ensureBarsForBeat(lastMarker.beat)
+  record('自动卡点')
+  commit()
+  state.statusText = `自动卡点完成：新增 ${accepted.length} 个标记点`
+  return accepted.length
+}
+
+/** 单个音频片段的重音检测：把命中的位置（拍）追加到 out */
+function collectOnsets(
+  clip: AudioClip,
+  spb: number,
+  thresholdScale: number,
+  minGapSeconds: number,
+  out: number[]
+): void {
+  const buckets = Math.floor(clip.peaks.length / 2)
+  if (buckets < 8 || clip.sourceDuration <= 0 || clip.duration <= 0) return
+
+  // 1. 能量包络：每个桶取 |min| / |max| 中的较大值
+  const energy = new Float32Array(buckets)
+  for (let i = 0; i < buckets; i += 1) {
+    energy[i] = Math.max(Math.abs(clip.peaks[i * 2]), Math.abs(clip.peaks[i * 2 + 1]))
+  }
+
+  // 2. 正向差分：只保留能量上升的部分，得到起音强度曲线
+  const flux = new Float32Array(buckets)
+  let sum = 0
+  for (let i = 1; i < buckets; i += 1) {
+    const delta = energy[i] - energy[i - 1]
+    flux[i] = delta > 0 ? delta : 0
+    sum += flux[i]
+  }
+  // 静音片段不会有明显起音，直接跳过
+  const mean = sum / Math.max(1, buckets - 1)
+  if (mean < 1e-4) return
+  const threshold = mean * thresholdScale
+
+  // 3. 阈值 + 最小间隔（桶数）
+  const secondsPerBucket = clip.sourceDuration / buckets
+  const minGapBuckets = Math.max(1, Math.round(minGapSeconds / secondsPerBucket))
+  // 片段在时间轴上「源音频 0 秒」对应的拍号位置（片段起点前移 offset 秒）
+  const clipSourceOriginBeat = clip.start - clip.offset / spb
+  let lastIndex = -minGapBuckets
+
+  for (let i = 1; i < buckets; i += 1) {
+    const value = flux[i]
+    if (value < threshold) continue
+    // 局部极大值才算一次起音，避免一个重音被拆成多个
+    if (value < flux[i - 1]) continue
+    if (i + 1 < buckets && value < flux[i + 1]) continue
+    if (i - lastIndex < minGapBuckets) continue
+    lastIndex = i
+    const beat = roundBeat(clipSourceOriginBeat + (i * secondsPerBucket) / spb)
+    // 只保留落在片段可见区间内的位置
+    if (beat < clip.start - 1e-6 || beat > clip.start + clip.duration + 1e-6) continue
+    if (beat < 0) continue
+    out.push(beat)
+  }
+}
+
 // ---------------------------------------------------------------- 虚拟键盘高亮
 
 /** 屏幕键盘：按下发声（需要音频上下文已激活），力度取自键盘力度设置 */
@@ -2380,6 +2621,7 @@ export function newProject(): void {
   state.selectedTrackId = state.project.tracks[0]?.id ?? ''
   state.selectedNoteIds = []
   state.selectedClipId = ''
+  state.selectedMarkerId = ''
   state.view.scrollLeft = 0
   resetHistory(state.project)
   // 新建工程先不落盘：用户未做任何改动就退出时，不出现在历史列表里
@@ -2403,6 +2645,7 @@ export function loadProjectById(id: string): void {
   state.selectedTrackId = project.tracks[0]?.id ?? ''
   state.selectedNoteIds = []
   state.selectedClipId = ''
+  state.selectedMarkerId = ''
   state.view.scrollLeft = 0
   resetHistory(project)
   projectPersisted = true

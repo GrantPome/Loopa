@@ -15,6 +15,7 @@ import InstrumentDialog from './components/InstrumentDialog.vue'
 import { layout, layoutUi, resetLayout, setEditMode } from '@/core/layout'
 import {
   activeTrack,
+  addMarker,
   clearNoteSelection,
   deleteSelectedNotes,
   ensureAudio,
@@ -108,6 +109,10 @@ function onKeyDown(event: KeyboardEvent): void {
   if (event.code === 'Space') {
     event.preventDefault()
     void togglePlay()
+  } else if (event.key === 'm' || event.key === 'M') {
+    // M：在播放头位置打一个标记点（卡点常用：空格播放、听到重音按 M）
+    event.preventDefault()
+    addMarker()
   } else if (event.key === 'Delete' || event.key === 'Backspace') {
     event.preventDefault()
     // 音频轨上删除的是选中的波形片段，MIDI 轨上删除的是选中的音符

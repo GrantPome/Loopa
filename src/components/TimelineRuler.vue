@@ -4,8 +4,22 @@
  * 横向滚动与钢琴卷帘联动（共享 state.view）
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { duplicateClip, removeClip, resizeClip, selectAudioClip, splitClip, state, seek } from '@/core/store'
+import {
+  addMarker,
+  duplicateClip,
+  moveMarker,
+  removeClip,
+  removeMarker,
+  renameMarker,
+  resizeClip,
+  seekMarker,
+  selectAudioClip,
+  splitClip,
+  state,
+  seek
+} from '@/core/store'
 import { beatsPerBarOf, clamp } from '@/utils/music'
+import type { TimelineMarker } from '@/types'
 import { hexToRgba } from '@/utils/color'
 import { peakRange } from '@/utils/waveform'
 import { KEY_WIDTH, LANE_HEIGHT, MAX_RULER_LANES, RULER_HEIGHT, SCROLLBAR_SIZE } from '@/utils/layout'
@@ -142,6 +156,37 @@ function draw(): void {
     }
   })
 
+  // ---------- 标记点（标点 / 卡点） ----------
+  // 竖线贯穿整个总轨方便对齐，旗标与标签画在标尺带上，先画再叠播放头
+  let labelEndX = -Infinity
+  for (const marker of state.project.markers) {
+    const mx = marker.beat * px
+    if (mx < viewL - 40 || mx > viewR + 40) continue
+    const selected = marker.id === state.selectedMarkerId
+
+    // 贯穿线（虚线感用短段落实现，避免依赖 setLineDash 的缩放差异）
+    ctx.fillStyle = selected ? 'rgba(79, 157, 247, 0.85)' : 'rgba(79, 157, 247, 0.34)'
+    for (let y = RULER_HEIGHT; y < cssHeight; y += 6) ctx.fillRect(mx, y, 1, 3)
+
+    // 旗标：标尺带内的三角小旗
+    ctx.fillStyle = selected ? '#7cb8ff' : '#4f9df7'
+    ctx.beginPath()
+    ctx.moveTo(mx - 4, 1)
+    ctx.lineTo(mx + 4, 1)
+    ctx.lineTo(mx, 9)
+    ctx.closePath()
+    ctx.fill()
+
+    // 标签：与相邻标签不重叠时才绘制，避免卡点密集时糊成一片
+    if (mx + 4 >= labelEndX + 4) {
+      ctx.font = '10px system-ui, sans-serif'
+      ctx.fillStyle = selected ? '#ffffff' : 'rgba(255, 255, 255, 0.62)'
+      const text = marker.label
+      ctx.fillText(text, mx + 6, 5)
+      labelEndX = mx + 6 + ctx.measureText(text).width
+    }
+  }
+
   // ---------- 循环区间标记 ----------
   if (state.loopOn) {
     const loopX = Math.floor(totalBeats.value * px)
@@ -205,10 +250,40 @@ function clipAt(event: PointerEvent | MouseEvent): { trackId: string; clipId: st
 let trimming: { trackId: string; clipId: string; edge: 'left' | 'right' } | null = null
 /** 右键菜单状态（屏幕坐标） */
 const clipMenu = ref<{ x: number; y: number; trackId: string; clipId: string; canSplit: boolean } | null>(null)
+/** 当前正在拖拽的标记点 id（'' 表示未拖拽） */
+let draggingMarkerId = ''
+
+/** 命中测试：标尺带上的标记点旗标（±6px 判定） */
+function markerAt(event: PointerEvent | MouseEvent): TimelineMarker | null {
+  const canvas = canvasEl.value
+  if (!canvas) return null
+  const rect = canvas.getBoundingClientRect()
+  // 只能在标尺带上抓旗标，避免误抢轨道区域的点击
+  if (event.clientY - rect.top > RULER_HEIGHT + 2) return null
+  const beat = Math.max(0, (event.clientX - rect.left) / state.view.pxPerBeat)
+  let best: TimelineMarker | null = null
+  let bestDistance = 6 / state.view.pxPerBeat
+  for (const marker of state.project.markers) {
+    const distance = Math.abs(marker.beat - beat)
+    if (distance < bestDistance) {
+      best = marker
+      bestDistance = distance
+    }
+  }
+  return best
+}
 
 function onPointerDown(event: PointerEvent): void {
   if (event.button !== 0) return
   clipMenu.value = null
+  // 标尺上的标记点优先：抓旗标即选中并开始拖动，不移动播放头
+  const marker = markerAt(event)
+  if (marker) {
+    seekMarker(marker.id)
+    draggingMarkerId = marker.id
+    ;(event.target as HTMLElement).setPointerCapture(event.pointerId)
+    return
+  }
   const hit = clipAt(event)
   if (hit) selectAudioClip(hit.trackId, hit.clipId)
   // 点到片段边缘：进入修剪模式，不移动播放头
@@ -222,8 +297,27 @@ function onPointerDown(event: PointerEvent): void {
   seek(beatAtEvent(event))
 }
 
+/** 双击标尺带：空白处打点，双击已有旗标则重命名 */
+function onDoubleClick(event: MouseEvent): void {
+  const canvas = canvasEl.value
+  if (!canvas) return
+  const rect = canvas.getBoundingClientRect()
+  if (event.clientY - rect.top > RULER_HEIGHT) return
+  const marker = markerAt(event)
+  if (marker) {
+    onMarkerRename(marker.id, marker.label)
+    return
+  }
+  addMarker(beatAtEvent(event))
+}
+
 function onPointerMove(event: PointerEvent): void {
   const canvas = canvasEl.value
+  // 拖拽标记点：实时改位置（store 内部按 coalesceKey 合并成一步）
+  if (draggingMarkerId) {
+    moveMarker(draggingMarkerId, beatAtEvent(event))
+    return
+  }
   // 修剪中：根据手柄方向改写片段起止
   if (trimming) {
     const track = state.project.tracks.find((t) => t.id === trimming!.trackId)
@@ -245,10 +339,14 @@ function onPointerMove(event: PointerEvent): void {
     }
     return
   }
-  // 悬停反馈：靠近片段边缘时显示左右箭头
+  // 悬停反馈：标记点用抓取光标，片段边缘用左右箭头
   if (!dragging && canvas) {
-    const hit = clipAt(event)
-    canvas.style.cursor = hit && hit.edge !== 'body' ? 'ew-resize' : ''
+    if (markerAt(event)) {
+      canvas.style.cursor = 'grab'
+    } else {
+      const hit = clipAt(event)
+      canvas.style.cursor = hit && hit.edge !== 'body' ? 'ew-resize' : ''
+    }
   }
   if (!dragging) return
   seek(beatAtEvent(event))
@@ -257,10 +355,17 @@ function onPointerMove(event: PointerEvent): void {
 function onPointerUp(): void {
   dragging = false
   trimming = null
+  draggingMarkerId = ''
 }
 
-/** 右键：在波形片段上弹出操作菜单 */
+/** 右键：标记点上删除，波形片段上弹出操作菜单 */
 function onContextMenu(event: MouseEvent): void {
+  const marker = markerAt(event)
+  if (marker) {
+    event.preventDefault()
+    removeMarker(marker.id)
+    return
+  }
   const hit = clipAt(event)
   if (!hit) return
   event.preventDefault()
@@ -269,6 +374,12 @@ function onContextMenu(event: MouseEvent): void {
   // 仅当播放头落在片段内部时允许「在播放头处分割」
   const canSplit = !!clip && state.playheadBeats > clip.start && state.playheadBeats < clip.start + clip.duration
   clipMenu.value = { x: event.clientX, y: event.clientY, trackId: hit.trackId, clipId: hit.clipId, canSplit }
+}
+
+/** 双击标记点旗标：重命名 */
+function onMarkerRename(id: string, current: string): void {
+  const next = window.prompt('标记点名称', current)
+  if (next !== null) renameMarker(id, next)
 }
 
 function onMenuSplit(): void {
@@ -332,7 +443,10 @@ watch(
     state.playheadBeats,
     state.selectedTrackId,
     state.selectedClipId,
-    state.loopOn
+    state.selectedMarkerId,
+    state.loopOn,
+    // 标记点的位置与名称会被就地改写，这里用指纹字符串触发重绘
+    () => state.project.markers.map((m) => `${m.beat}:${m.label}`).join('|')
   ],
   () => requestDraw()
 )
@@ -351,6 +465,7 @@ watch(
           @pointermove="onPointerMove"
           @pointerup="onPointerUp"
           @pointercancel="onPointerUp"
+          @dblclick="onDoubleClick"
           @contextmenu="onContextMenu"
           @wheel="onWheel"
         />
