@@ -114,11 +114,18 @@ const menus = computed<MenuDef[]>(() => [
         disabled: state.busy
       }
     ]
-  },
+  }
+])
+
+/**
+ * 标点下拉：单独定义并渲染在工具栏的「标点」分组内（与打点 / 自动卡点 / 跳转按钮同组），
+ * 不再跟在「文件 / 导出」旁边。沿用顶栏统一的 menu-wrap 样式与 openMenu 开关状态。
+ */
+const markerMenus = computed<MenuDef[]>(() => [
   {
     key: 'markers',
     label: '标点',
-    title: '标点：重命名或清空（打点与跳转已放在工具栏快捷按钮上）',
+    title: '标点：重命名或清空（打点与跳转已放在同组的快捷按钮上）',
     items: [
       {
         label: '重命名选中标点',
@@ -377,6 +384,33 @@ onBeforeUnmount(() => {
       <button class="icon" :disabled="!markerCount" title="跳到上一个标点" @click="gotoMarker(-1)">‹</button>
       <button class="icon" :disabled="!markerCount" title="跳到下一个标点" @click="gotoMarker(1)">›</button>
       <span class="marker-count" :title="`当前共 ${markerCount} 个标点`">{{ markerCount }}</span>
+      <div
+        v-for="menu in markerMenus"
+        :key="menu.key"
+        :ref="(el) => setMenuRef(el, menu.key)"
+        class="menu-wrap"
+      >
+        <button
+          class="menu-trigger"
+          :class="{ active: openMenu === menu.key }"
+          :title="menu.title"
+          @click="toggleMenu(menu.key)"
+        >
+          {{ menu.label }}<span class="caret">▾</span>
+        </button>
+        <div v-if="openMenu === menu.key" class="menu-panel">
+          <button
+            v-for="item in menu.items"
+            :key="item.label"
+            class="menu-item"
+            :disabled="item.disabled"
+            @click="runMenuAction(item.action)"
+          >
+            <span class="menu-item-name">{{ item.label }}</span>
+            <span class="menu-item-desc">{{ item.desc }}</span>
+          </button>
+        </div>
+      </div>
     </div>
 
     <div class="spacer" />
