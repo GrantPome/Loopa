@@ -191,6 +191,14 @@ onBeforeUnmount(() => {
       <span class="dim">正在弹奏：{{ instrumentLabel }}</span>
     </div>
 
+    <!-- 音名说明 + 设备还原度提示 -->
+    <div
+      class="note-hint"
+      title="琴键上的 C3、C4 这类标注叫「音名」（科学音高记号）：字母表示音，数字表示八度组，数字越大音越高。部分机型 / 扬声器无法很好地还原过低或过高的音区，可能出现破音甚至无声。"
+    >
+      琴键上的 C3、C4 这类标注叫「音名」（科学音高记号）：字母表示音，数字表示八度组，数字越大音越高；部分机型 / 扬声器无法很好地还原过低或过高的音区，可能出现破音甚至无声。
+    </div>
+
     <div class="keys">
       <!-- 白键 -->
       <div
@@ -246,6 +254,17 @@ onBeforeUnmount(() => {
 
 .gap {
   flex: 1;
+}
+
+.note-hint {
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  opacity: 0.85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: none;
 }
 
 .mini {
