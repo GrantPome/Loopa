@@ -50,7 +50,8 @@ const changelog: { date: string; title: string; items: string[] }[] = [
     date: '2026-10-17',
     title: '品牌 LOGO 换新',
     items: [
-      '顶栏品牌图形更换为 Loopa 字标，并按新图形的比例调整了占位尺寸，避免留白'
+      '顶栏品牌图形更换为 Loopa 字标，并按新图形的比例调整了占位尺寸，避免留白',
+      'LOGO 统一以白色显示，主页左栏品牌位也换成了同款字标'
     ]
   },
   {
@@ -275,7 +276,8 @@ function formatTime(timestamp: number): string {
     <div class="welcome">
       <!-- 左侧菜单区 -->
       <aside class="menu">
-        <div class="app-name">Loopa</div>
+        <!-- 品牌字标：与顶栏同款 LOGO，白色显示，替代原先的文字标识 -->
+        <span class="brand-logo" role="img" aria-label="Loopa" />
 
         <!-- 主页选项：右侧显示欢迎插画（与新建/打开项目同为菜单按钮样式） -->
         <button
@@ -604,12 +606,18 @@ function formatTime(timestamp: number): string {
   border-right: 1px solid var(--line);
 }
 
-.app-name {
+/*
+ * 品牌字标：源 SVG 是纯白 + 透明底，这里沿用顶栏的 CSS mask 方式着色，
+ * 明确取白色，避免依赖主题令牌而出现偏色；容器尺寸按字标比例（约 2.06:1）设定。
+ */
+.brand-logo {
+  display: block;
+  width: 64px;
+  height: 31px;
   margin-bottom: 18px;
-  font-size: 12px;
-  letter-spacing: 2px;
-  color: var(--text-dim);
-  text-transform: uppercase;
+  background-color: #ffffff;
+  -webkit-mask: url('../assets/loopa-logo.svg') no-repeat left center / contain;
+  mask: url('../assets/loopa-logo.svg') no-repeat left center / contain;
 }
 
 /* 菜单主按钮：深灰底白字，整宽，PR 菜单观感 */
@@ -1004,7 +1012,7 @@ function formatTime(timestamp: number): string {
     border-bottom: 1px solid var(--line);
   }
 
-  .app-name {
+  .brand-logo {
     margin-bottom: 10px;
   }
 

@@ -491,15 +491,14 @@ onBeforeUnmount(() => {
 
 /*
  * 品牌 LOGO：Loopa 字标（270×131，约 2.06:1）用 CSS mask 着色，
- * 背景色取主题强调色，因此深浅色模式下都能正常显示
- * （源 SVG 是纯白 + 透明底，直接当图片贴在浅色背景上会看不见）。
- * 容器宽高按新字标的比例设置，避免 mask 居中留出大片空白。
+ * 固定取白色（源 SVG 本身就是白字），在深色顶栏上对比清晰；
+ * 容器宽高按字标的比例设置，避免 mask 居中留出大片空白。
  */
 .logo {
   display: inline-block;
   width: 41px;
   height: 20px;
-  background-color: var(--accent);
+  background-color: #ffffff;
   -webkit-mask: url('../assets/loopa-logo.svg') no-repeat center / contain;
   mask: url('../assets/loopa-logo.svg') no-repeat center / contain;
 }
