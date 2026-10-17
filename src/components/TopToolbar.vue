@@ -240,7 +240,7 @@ onBeforeUnmount(() => {
   <header class="toolbar">
     <!-- 品牌与工程名 -->
     <div class="group brand">
-      <span class="logo" role="img" aria-label="TonePome" />
+      <span class="logo" role="img" aria-label="Loopa" />
       <input
         class="name-input"
         :value="state.project.name"
@@ -499,8 +499,8 @@ onBeforeUnmount(() => {
   width: 102px;
   height: 18px;
   background-color: var(--accent);
-  -webkit-mask: url('../assets/tone-pome-logo.svg') no-repeat center / contain;
-  mask: url('../assets/tone-pome-logo.svg') no-repeat center / contain;
+  -webkit-mask: url('../assets/loopa-logo.svg') no-repeat center / contain;
+  mask: url('../assets/loopa-logo.svg') no-repeat center / contain;
 }
 
 .name-input {

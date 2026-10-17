@@ -1,8 +1,8 @@
 <div align="center">
-  <img src="docs/images/promo.png" alt="TonePome · 随身库乐队" width="100%" />
+  <img src="docs/images/promo.png" alt="Loopa · 随身库乐队" width="100%" />
 </div>
 
-<h1 align="center">TonePome · 随身库乐队</h1>
+<h1 align="center">Loopa · 随身库乐队</h1>
 
 <p align="center">
   <em>灵感即弹，打开即作 —— 浏览器里的音乐宇宙</em><br />
@@ -25,7 +25,7 @@
 
 ## 这是什么
 
-TonePome 是一款运行在浏览器里的「随身库乐队」。它不依赖任何后端服务，全部编曲、录音、混音与导出都在本地完成，把一条完整的创作链路塞进一个网页里：
+Loopa 是一款运行在浏览器里的「随身库乐队」。它不依赖任何后端服务，全部编曲、录音、混音与导出都在本地完成，把一条完整的创作链路塞进一个网页里：
 
 **编曲 → 录音 → 混音 → 导出**
 
@@ -180,6 +180,6 @@ src/
 ---
 
 <p align="center">
-  <b>TonePome</b> · 随身库乐队<br />
+  <b>Loopa</b> · 随身库乐队<br />
   Created by <a href="https://github.com/GrantPome">Grant</a>
 </p>

@@ -4,7 +4,7 @@
  * Premiere Pro 风格欢迎页布局：
  * - 左侧菜单：主页 / 新建项目 / 打开项目，下方列表为团队项目入口（占位，即将推出）
  * - 右侧主内容区：
- *   - 主页：顶部大标题「欢迎使用 TonePome」，中间为音乐制作相关的简约线稿图标
+ *   - 主页：顶部大标题「欢迎使用 Loopa」，中间为音乐制作相关的简约线稿图标
  *     （钢琴键 / 音符 / 波形），下方是「编辑、效果和导出」标语
  *   - 新建项目：右栏列出「新建空白项目」「示例音频」与「导入音频 / 工程 JSON / MIDI」入口
  *   - 打开项目：右侧直接展示最近保存的工程列表，可打开 / 重命名 / 导出 JSON / 删除，不再使用弹窗
@@ -46,6 +46,14 @@ const comingSoonItems = [
  * 更新日志：按发布日期倒序，内容整理自真实提交历史
  */
 const changelog: { date: string; title: string; items: string[] }[] = [
+  {
+    date: '2026-10-17',
+    title: '品牌更名',
+    items: [
+      '产品名称由 TonePome 更名为 Loopa：主页标题、顶栏品牌、关于页与页面标题同步更新',
+      '品牌 LOGO 资源与站内引用一并更名；本地工程数据与部署路径保持不变，老数据可直接继续使用'
+    ]
+  },
   {
     date: '2026-10-17',
     title: '问题修复',
@@ -134,7 +142,7 @@ const changelog: { date: string; title: string; items: string[] }[] = [
     items: [
       '自定义音源：导入采样拼装旋律 / 鼓组音源，采样存 IndexedDB',
       '乐器与音源管理器窗口，内置音色支持依次试听全部采样',
-      '替换 TonePome 品牌 LOGO，新增全局弹窗过渡动画'
+      '替换 Loopa 品牌 LOGO，新增全局弹窗过渡动画'
     ]
   },
   {
@@ -260,7 +268,7 @@ function formatTime(timestamp: number): string {
     <div class="welcome">
       <!-- 左侧菜单区 -->
       <aside class="menu">
-        <div class="app-name">TonePome</div>
+        <div class="app-name">Loopa</div>
 
         <!-- 主页选项：右侧显示欢迎插画（与新建/打开项目同为菜单按钮样式） -->
         <button
@@ -341,7 +349,7 @@ function formatTime(timestamp: number): string {
       <main class="main" :class="{ 'top-align': view !== 'home' }">
         <!-- 主页：欢迎插画 -->
         <template v-if="view === 'home'">
-          <h1 class="title">欢迎使用 TonePome</h1>
+          <h1 class="title">欢迎使用 Loopa</h1>
 
           <!-- 简约线稿图标：钢琴键 / 音符 / 波形 -->
           <div class="art">
@@ -500,7 +508,7 @@ function formatTime(timestamp: number): string {
           <div class="about">
             <!-- 基本信息 -->
             <section class="about-info">
-              <div class="about-brand">TonePome</div>
+              <div class="about-brand">Loopa</div>
               <p class="about-desc">
                 网页版在线音乐编辑器（DAW）：钢琴卷帘编曲、音频轨与效果器、混音台，
                 支持 MIDI 导入导出与 WAV 离线导出。纯前端实现，工程数据保存在本地浏览器中。
