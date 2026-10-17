@@ -117,37 +117,18 @@ const menus = computed<MenuDef[]>(() => [
   },
   {
     key: 'markers',
-    label: markerLabel.value,
-    title: '时间轴标记点：标点与卡点',
+    label: '标点',
+    title: '标点：重命名或清空（打点与跳转已放在工具栏快捷按钮上）',
     items: [
-      { label: '打点', desc: '在播放头位置放一个标记点（快捷键 M）', action: () => addMarker() },
       {
-        label: '自动卡点',
-        desc: '分析音频波形重音，批量生成标记点',
-        action: () => detectMarkers(),
-        disabled: !hasAudioClips.value
-      },
-      {
-        label: '上一个标记点',
-        desc: '跳到当前位置之前的标记点',
-        action: () => gotoMarker(-1),
-        disabled: !markerCount.value
-      },
-      {
-        label: '下一个标记点',
-        desc: '跳到当前位置之后的标记点',
-        action: () => gotoMarker(1),
-        disabled: !markerCount.value
-      },
-      {
-        label: '重命名选中标记',
-        desc: '给当前选中的标记点改名',
+        label: '重命名选中标点',
+        desc: '给当前选中的标点改名',
         action: renameSelectedMarker,
         disabled: !state.selectedMarkerId
       },
       {
-        label: '清空全部标记点',
-        desc: '删除本工程的所有标记点',
+        label: '清空全部标点',
+        desc: '删除本工程的所有标点',
         action: clearMarkers,
         disabled: !markerCount.value
       }
@@ -155,10 +136,8 @@ const menus = computed<MenuDef[]>(() => [
   }
 ])
 
-/** 标记点数量（用于菜单项禁用态与触发器上的计数） */
+/** 标点数量（快捷按钮的角标与禁用态依据） */
 const markerCount = computed(() => state.project.markers.length)
-/** 触发器文字：有标记时带上数量，方便一眼看出打了几个点 */
-const markerLabel = computed(() => (markerCount.value ? `标记 ${markerCount.value}` : '标记'))
 /** 只有工程里存在音频片段时才允许「自动卡点」 */
 const hasAudioClips = computed(() => state.project.tracks.some((t) => t.clips.length > 0))
 
@@ -376,6 +355,30 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
+    <div class="divider" />
+
+    <!-- 标点（标记点）：常用的打点与跳转直接放在工具栏上，随手可用 -->
+    <div class="group markers">
+      <button
+        class="icon flag"
+        title="在当前播放头位置打标点（快捷键 M）"
+        @click="addMarker()"
+      >
+        ⚑
+      </button>
+      <button
+        class="icon"
+        :disabled="!hasAudioClips"
+        title="自动卡点：分析音频波形重音，批量打标点"
+        @click="detectMarkers()"
+      >
+        ✦
+      </button>
+      <button class="icon" :disabled="!markerCount" title="跳到上一个标点" @click="gotoMarker(-1)">‹</button>
+      <button class="icon" :disabled="!markerCount" title="跳到下一个标点" @click="gotoMarker(1)">›</button>
+      <span class="marker-count" :title="`当前共 ${markerCount} 个标点`">{{ markerCount }}</span>
+    </div>
+
     <div class="spacer" />
 
     <!-- 中央编辑区视图切换：分段 Tab -->
@@ -436,6 +439,16 @@ onBeforeUnmount(() => {
   width: 1px;
   height: 22px;
   background: var(--line);
+}
+
+/* 标点组：按钮后的计数小字，方便一眼看出打了几个点 */
+.markers .marker-count {
+  min-width: 18px;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .spacer {

@@ -248,8 +248,17 @@ function clipAt(event: PointerEvent | MouseEvent): { trackId: string; clipId: st
 
 /** 当前正在修剪的片段与手柄 */
 let trimming: { trackId: string; clipId: string; edge: 'left' | 'right' } | null = null
-/** 右键菜单状态（屏幕坐标） */
-const clipMenu = ref<{ x: number; y: number; trackId: string; clipId: string; canSplit: boolean } | null>(null)
+/** 右键菜单项：style 为 separator 时渲染成分隔线 */
+interface ContextMenuItem {
+  label: string
+  style?: 'separator'
+  danger?: boolean
+  disabled?: boolean
+  run?: () => void
+}
+
+/** 右键菜单状态：标点与片段共用同一个菜单，天然不会重叠 */
+const contextMenu = ref<{ x: number; y: number; items: ContextMenuItem[] } | null>(null)
 /** 当前正在拖拽的标记点 id（'' 表示未拖拽） */
 let draggingMarkerId = ''
 
@@ -275,7 +284,7 @@ function markerAt(event: PointerEvent | MouseEvent): TimelineMarker | null {
 
 function onPointerDown(event: PointerEvent): void {
   if (event.button !== 0) return
-  clipMenu.value = null
+  contextMenu.value = null
   // 标尺上的标记点优先：抓旗标即选中并开始拖动，不移动播放头
   const marker = markerAt(event)
   if (marker) {
@@ -305,7 +314,7 @@ function onDoubleClick(event: MouseEvent): void {
   if (event.clientY - rect.top > RULER_HEIGHT) return
   const marker = markerAt(event)
   if (marker) {
-    onMarkerRename(marker.id, marker.label)
+    promptRenameMarker(marker)
     return
   }
   addMarker(beatAtEvent(event))
@@ -358,46 +367,81 @@ function onPointerUp(): void {
   draggingMarkerId = ''
 }
 
-/** 右键：标记点上删除，波形片段上弹出操作菜单 */
+/**
+ * 右键菜单：按命中目标给出不同操作
+ * - 点到标点旗标：重命名 / 删除标点（不会被立即删除，需在菜单里确认点击）
+ * - 点到波形片段：片段操作 + 就地打标点
+ * - 点到标尺空白：就地打标点
+ */
 function onContextMenu(event: MouseEvent): void {
+  const canvas = canvasEl.value
+  if (!canvas) return
+  const inRuler = event.clientY - canvas.getBoundingClientRect().top <= RULER_HEIGHT
+  const beat = beatAtEvent(event)
+
   const marker = markerAt(event)
   if (marker) {
     event.preventDefault()
-    removeMarker(marker.id)
+    contextMenu.value = {
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        { label: '重命名标点…', run: () => promptRenameMarker(marker) },
+        { label: '', style: 'separator' },
+        // 删除需要用户显式点击，避免右键误删
+        { label: '删除标点', danger: true, run: () => removeMarker(marker.id) }
+      ]
+    }
     return
   }
+
   const hit = clipAt(event)
-  if (!hit) return
+  if (!hit) {
+    // 只处理标尺带上的空白右键，轨道区域的空白保留浏览器默认菜单
+    if (!inRuler) return
+    event.preventDefault()
+    contextMenu.value = {
+      x: event.clientX,
+      y: event.clientY,
+      items: [{ label: '在此处打标点', run: () => addMarker(beat) }]
+    }
+    return
+  }
+
   event.preventDefault()
   selectAudioClip(hit.trackId, hit.clipId)
   const clip = state.project.tracks.find((t) => t.id === hit.trackId)?.clips.find((c) => c.id === hit.clipId)
   // 仅当播放头落在片段内部时允许「在播放头处分割」
   const canSplit = !!clip && state.playheadBeats > clip.start && state.playheadBeats < clip.start + clip.duration
-  clipMenu.value = { x: event.clientX, y: event.clientY, trackId: hit.trackId, clipId: hit.clipId, canSplit }
+  contextMenu.value = {
+    x: event.clientX,
+    y: event.clientY,
+    items: [
+      {
+        label: '在播放头处分割',
+        disabled: !canSplit,
+        run: () => splitClip(hit.trackId, hit.clipId, state.playheadBeats)
+      },
+      { label: '再制', run: () => duplicateClip(hit.trackId, hit.clipId) },
+      { label: '', style: 'separator' },
+      { label: '在此处打标点', run: () => addMarker(beat) },
+      { label: '', style: 'separator' },
+      { label: '删除片段', danger: true, run: () => removeClip(hit.trackId, hit.clipId) }
+    ]
+  }
 }
 
-/** 双击标记点旗标：重命名 */
-function onMarkerRename(id: string, current: string): void {
-  const next = window.prompt('标记点名称', current)
-  if (next !== null) renameMarker(id, next)
+/** 点击菜单项：先关闭菜单再执行，避免操作后菜单残留 */
+function runContextItem(item: ContextMenuItem): void {
+  contextMenu.value = null
+  item.run?.()
 }
 
-function onMenuSplit(): void {
-  const m = clipMenu.value
-  if (m) splitClip(m.trackId, m.clipId, state.playheadBeats)
-  clipMenu.value = null
-}
-
-function onMenuDuplicate(): void {
-  const m = clipMenu.value
-  if (m) duplicateClip(m.trackId, m.clipId)
-  clipMenu.value = null
-}
-
-function onMenuDelete(): void {
-  const m = clipMenu.value
-  if (m) removeClip(m.trackId, m.clipId)
-  clipMenu.value = null
+/** 弹出重命名输入框并写入 */
+function promptRenameMarker(marker: TimelineMarker): void {
+  const next = window.prompt('标点名称', marker.label)
+  if (next === null) return
+  renameMarker(marker.id, next)
 }
 
 function onWheel(event: WheelEvent): void {
@@ -472,13 +516,26 @@ watch(
       </div>
     </div>
 
-    <!-- 波形片段右键菜单（fixed 定位，坐标即指针位置） -->
+    <!-- 右键菜单（标点与波形片段共用，fixed 定位，坐标即指针位置） -->
     <Teleport to="body">
-      <div v-if="clipMenu" class="clip-menu-mask" @pointerdown="clipMenu = null" @contextmenu.prevent="clipMenu = null">
-        <div class="clip-menu" :style="{ left: clipMenu.x + 'px', top: clipMenu.y + 'px' }" @pointerdown.stop>
-          <button :disabled="!clipMenu.canSplit" @click="onMenuSplit">在播放头处分割</button>
-          <button @click="onMenuDuplicate">再制</button>
-          <button class="danger" @click="onMenuDelete">删除</button>
+      <div
+        v-if="contextMenu"
+        class="clip-menu-mask"
+        @pointerdown="contextMenu = null"
+        @contextmenu.prevent="contextMenu = null"
+      >
+        <div class="clip-menu" :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }" @pointerdown.stop>
+          <template v-for="(item, index) in contextMenu.items" :key="index">
+            <span v-if="item.style === 'separator'" class="clip-menu-sep" />
+            <button
+              v-else
+              :disabled="item.disabled"
+              :class="{ danger: item.danger }"
+              @click="runContextItem(item)"
+            >
+              {{ item.label }}
+            </button>
+          </template>
         </div>
       </div>
     </Teleport>
@@ -535,6 +592,13 @@ canvas {
   border: 1px solid var(--line);
   border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* 菜单分组分隔线 */
+.clip-menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--line);
 }
 
 .clip-menu button {
