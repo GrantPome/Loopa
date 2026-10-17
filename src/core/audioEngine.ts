@@ -34,6 +34,18 @@ interface AutomatableParam {
   setValueAtTime(value: number, time: number): unknown
   linearRampToValueAtTime(value: number, time: number): unknown
   cancelScheduledValues(time: number): unknown
+  cancelAndHoldAtTime(time: number): unknown
+}
+
+/**
+ * 仅在数值确有变化时写入参数。
+ * Tone 的 value setter 内部是「cancelScheduledValues + setValueAtTime」，
+ * 每次赋值都会往参数时间轴插入事件；对没有变化的参数反复赋值会让事件无限堆积，
+ * 最终拖慢主线程并造成音频卡顿 / 杂音。
+ */
+function setParamValue(node: AutomatableParam, value: number): void {
+  if (Math.abs(node.value - value) < 1e-6) return
+  node.value = value
 }
 
 /**
@@ -196,6 +208,17 @@ class AudioEngine {
     return this.contextReady
   }
 
+  /** 音频上下文是否处于运行状态（浏览器会在后台/切换音频设备/省电时自动挂起） */
+  get contextRunning(): boolean {
+    return Tone.getContext().state === 'running'
+  }
+
+  /** 恢复被挂起的音频上下文；已运行或尚未构建链路时什么都不做 */
+  async resume(): Promise<void> {
+    if (!this.contextReady || this.contextRunning) return
+    await Tone.start()
+  }
+
   private buildGraph(): void {
     if (this.graphReady) return
 
@@ -256,8 +279,18 @@ class AudioEngine {
     if (!this.graphReady) return
     const param = this.transport.bpm
     const base = atTime ?? Tone.now()
+    const target = bpmAtBeat(startBeat, this.tempoPoints, this.bpm)
+    // 必须在取消排期之前读取当前速度：cancelScheduledValues 会清空参数时间轴，
+    // 之后再读只能拿到构造时的初始速度
+    const current = param.value
     param.cancelScheduledValues(0)
-    param.setValueAtTime(bpmAtBeat(startBeat, this.tempoPoints, this.bpm), base)
+    if (Math.abs(current - target) < 0.01) {
+      param.setValueAtTime(target, base)
+    } else {
+      // 与当前速度不同（播放中改速度、循环回绕）时用极短斜坡过渡，避免阶跃爆音
+      param.setValueAtTime(current, base)
+      param.linearRampToValueAtTime(target, base + 0.03)
+    }
     for (const bp of tempoBreakpoints(this.tempoPoints, this.bpm)) {
       if (bp.beat <= startBeat) continue
       param.linearRampToValueAtTime(
@@ -482,14 +515,12 @@ class AudioEngine {
    * 已被自动化曲线接管的参数不再写静态值，否则会与曲线打架（曲线的排期见 scheduleAutomation）。
    */
   private applyMix(channel: Channel, track: Track, tracks: Track[]): void {
-    if (!this.hasAutomation(track, 'volume')) {
-      channel.gain.gain.value = computeTrackGain(track, tracks)
-    }
-    if (!this.hasAutomation(track, 'pan')) channel.panner.pan.value = track.pan
-    if (!this.hasAutomation(track, 'eqLow')) channel.eq.low.value = track.eqLow
-    if (!this.hasAutomation(track, 'eqMid')) channel.eq.mid.value = track.eqMid
-    if (!this.hasAutomation(track, 'eqHigh')) channel.eq.high.value = track.eqHigh
-    if (!this.hasAutomation(track, 'reverbSend')) channel.send.gain.value = track.reverbSend
+    if (!this.hasAutomation(track, 'volume')) setParamValue(channel.gain.gain, computeTrackGain(track, tracks))
+    if (!this.hasAutomation(track, 'pan')) setParamValue(channel.panner.pan, track.pan)
+    if (!this.hasAutomation(track, 'eqLow')) setParamValue(channel.eq.low, track.eqLow)
+    if (!this.hasAutomation(track, 'eqMid')) setParamValue(channel.eq.mid, track.eqMid)
+    if (!this.hasAutomation(track, 'eqHigh')) setParamValue(channel.eq.high, track.eqHigh)
+    if (!this.hasAutomation(track, 'reverbSend')) setParamValue(channel.send.gain, track.reverbSend)
   }
 
   // ------------------------------------------------------------ 自动化包络
@@ -523,12 +554,16 @@ class AudioEngine {
    * 自动化的关键点排期在 scheduleProject 里重建，这里只负责「擦干净」。
    */
   private resetAutomation(channel: Channel, track: Track): void {
+    const now = Tone.getContext().currentTime
     for (const param of ['volume', 'pan', 'reverbSend', 'eqLow', 'eqMid', 'eqHigh'] as AutomationParam[]) {
       const node = this.paramNode(channel, param)
-      // 先取消掉时间轴上所有已排期的事件，避免旧曲线继续生效
-      node.cancelScheduledValues(0)
+      // 先「保持当前值」再取消后续排期：WebAudio 的 cancelScheduledValues 会把
+      // 正在进行的斜坡整段撤掉，参数会瞬间跳回上一个台阶值，播放中编辑即爆音
+      node.cancelAndHoldAtTime(now)
       if (this.hasAutomation(track, param)) continue
-      node.value = track[param]
+      // 与当前值几乎相同时不再赋值，避免参数时间轴被无意义的事件塞满
+      if (Math.abs(node.value - track[param]) < 1e-6) continue
+      node.linearRampToValueAtTime(track[param], now + 0.02)
     }
   }
 
@@ -565,20 +600,35 @@ class AudioEngine {
       const channel = this.channels.get(track.id)
       if (!channel) continue
       let target = 1
+      let active = false
       for (const effect of track.effects) {
         if (!effect.enabled || effect.type !== 'compressor' || !effect.sidechain) continue
         const source = this.channels.get(effect.sidechain.sourceTrackId)
         if (!source) continue
+        active = true
         const level = readMeter(source.meter)
         // amount 是最大衰减量（dB）：检测电平越高，衰减越接近 amount
         const reduction = Math.min(1, level * 2) * effect.sidechain.amount
         target = Math.min(target, dbToGain(-reduction))
       }
+      // 没有侧链的轨道完全不碰参数：Tone 的 value setter 内部是 cancel+set，
+      // 每次赋值都会往参数时间轴塞事件，逐帧写入会让事件无限堆积并拖慢主线程
+      if (!active) {
+        if (channel.sidechainEnv !== 1) {
+          channel.sidechainEnv = 1
+          channel.duck.gain.rampTo(1, 0.05)
+        }
+        continue
+      }
       const timeConstant = this.sidechainRelease(track)
       // 一阶平滑：时间常数与帧间隔的比值决定每帧靠近目标的比例
       const alpha = 1 - Math.exp(-deltaMs / Math.max(1, timeConstant * 1000))
-      channel.sidechainEnv += (target - channel.sidechainEnv) * alpha
-      channel.duck.gain.value = channel.sidechainEnv
+      const next = channel.sidechainEnv + (target - channel.sidechainEnv) * alpha
+      // 变化极小时不写入，避免无意义的参数事件堆积
+      if (Math.abs(next - channel.sidechainEnv) > 0.0005) {
+        channel.sidechainEnv = next
+        channel.duck.gain.value = next
+      }
     }
   }
 
@@ -615,9 +665,10 @@ class AudioEngine {
     const channel = this.channels.get(trackId)
     if (!channel) return
     const node = this.paramNode(channel, param)
-    const now = Tone.now()
-    node.cancelScheduledValues(now)
-    node.setValueAtTime(value, now)
+    const now = Tone.getContext().currentTime
+    // 用极短斜坡过渡：直接赋值（内部是 cancel+set）会让参数阶跃跳变，产生爆音
+    node.cancelAndHoldAtTime(now)
+    node.linearRampToValueAtTime(value, now + 0.02)
   }
 
   private disposeChannel(channel: Channel): void {
@@ -918,10 +969,13 @@ class AudioEngine {
 
   pause(): void {
     this.transport.pause()
-    // 钉住当前速度：取消尚未触发的斜坡，防止暂停期间 bpm 参数继续漂移
+    // 钉住当前速度：取消尚未触发的斜坡，防止暂停期间 bpm 参数继续漂移。
+    // 注意必须「先读后取消」——cancelScheduledValues(0) 会清空参数时间轴，
+    // 之后再读 param.value 只能拿到构造时的初始速度，速度会莫名跳回默认值
     const param = this.transport.bpm
+    const current = param.value
     param.cancelScheduledValues(0)
-    param.setValueAtTime(param.value, Tone.now())
+    param.setValueAtTime(current, Tone.now())
   }
 
   stop(): void {
@@ -963,8 +1017,11 @@ class AudioEngine {
 
   /** 立即触发（用于屏幕键盘，使用 currentTime 降低延迟） */
   previewAttack(trackId: string, midi: number, velocity = 0.85): void {
-    // 浏览器可能自动挂起 AudioContext，先恢复再发声
-    void Tone.start()
+    // 上下文被挂起时 currentTime 已冻结，直接触发只会得到无声，先恢复再触发
+    if (!this.contextRunning) {
+      void this.ensureReady()
+      return
+    }
     const channel = this.channels.get(trackId)
     if (!channel || !channel.instrument) return
     const now = Tone.getContext().currentTime
@@ -986,7 +1043,10 @@ class AudioEngine {
    * 避免写下音符后声音一直挂着不释放。
    */
   previewNote(trackId: string, midi: number, velocity = 0.85): void {
-    void Tone.start()
+    if (!this.contextRunning) {
+      void this.ensureReady()
+      return
+    }
     const channel = this.channels.get(trackId)
     if (!channel || !channel.instrument) return
     const now = Tone.getContext().currentTime
@@ -997,7 +1057,10 @@ class AudioEngine {
   /** 试听一个自定义音源采样（按原始音高原速播放） */
   previewSample(key: string): void {
     if (!this.graphReady) return
-    void Tone.start()
+    if (!this.contextRunning) {
+      void this.ensureReady()
+      return
+    }
     const buffer = this.clipBuffer(key)
     if (!buffer) return
     const player = new Tone.Player(buffer)
@@ -1008,7 +1071,10 @@ class AudioEngine {
 
   /** 试听一段音频片段（波形编辑器里点击片段头部播放） */
   previewClip(trackId: string, key: string, offset: number, duration: number): void {
-    void Tone.start()
+    if (!this.contextRunning) {
+      void this.ensureReady()
+      return
+    }
     const channel = this.channels.get(trackId)
     if (!channel || channel.kind !== 'audio') return
     const buffer = this.clipBuffer(key)
@@ -1034,7 +1100,10 @@ class AudioEngine {
    */
   previewVoice(type: InstrumentType, project: Project, customInstrumentId = '', quick = false): void {
     if (!this.graphReady) return
-    void Tone.start()
+    if (!this.contextRunning) {
+      void this.ensureReady()
+      return
+    }
     const custom =
       type === 'custom' ? this.resolveCustomInstrument(project, customInstrumentId) : null
     const drum = isDrumTrack(type, custom?.kind)

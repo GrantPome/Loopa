@@ -2581,9 +2581,16 @@ export function renameProject(name: string): void {
 
 // ---------------------------------------------------------------- 播放控制
 
-/** 首次用户手势时激活音频上下文 */
+/**
+ * 激活 / 恢复音频上下文。
+ * 首次调用会构建整条输出链路；之后每次都会检查上下文是否被浏览器挂起
+ * （页面切到后台、切换音频设备、长时间停止播放后都会发生），挂起时先恢复再返回。
+ */
 export async function ensureAudio(): Promise<void> {
-  if (state.audioReady) return
+  if (state.audioReady) {
+    await engine.resume()
+    return
+  }
   await engine.ensureReady()
   state.audioReady = true
   // 引擎链路刚构建时用的是默认值，这里把工程里保存的混音参数补上
@@ -2913,14 +2920,27 @@ function collectOnsets(
 
 // ---------------------------------------------------------------- 虚拟键盘高亮
 
+/**
+ * 触发实时发声前先确保音频上下文在运行。
+ * 上下文被挂起时引擎里的 currentTime 已冻结，直接触发等于无声，
+ * 因此先恢复到运行状态再发声；未运行且已就绪时立即发声，不额外引入延迟。
+ */
+function withRunningContext(trigger: () => void): void {
+  if (engine.contextRunning) {
+    trigger()
+    return
+  }
+  void ensureAudio().then(trigger)
+}
+
 /** 屏幕键盘：按下发声（需要音频上下文已激活），力度取自键盘力度设置 */
 export function previewAttack(trackId: string, midi: number, velocity = state.keyboardVelocity): void {
-  engine.previewAttack(trackId, midi, velocity)
+  withRunningContext(() => engine.previewAttack(trackId, midi, velocity))
 }
 
 /** 屏幕键盘：抬起停止 */
 export function previewRelease(trackId: string, midi: number): void {
-  engine.previewRelease(trackId, midi)
+  withRunningContext(() => engine.previewRelease(trackId, midi))
 }
 
 /**
@@ -2928,7 +2948,7 @@ export function previewRelease(trackId: string, midi: number): void {
  * 帮助确认写下的音高与音色。采用一次性触发，无需手动抬起。
  */
 export function previewNote(trackId: string, midi: number, velocity = 0.85): void {
-  engine.previewNote(trackId, midi, velocity)
+  withRunningContext(() => engine.previewNote(trackId, midi, velocity))
 }
 
 const pitchExpiry = new Map<number, number>()
