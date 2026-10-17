@@ -183,7 +183,9 @@ class AudioEngine {
 
   /** 用户首次点击后调用，激活 WebAudio 上下文并构建主输出链路 */
   async ensureReady(): Promise<void> {
-    if (this.contextReady) return
+    // 上下文可能被浏览器自动挂起（尤其播放停止一段时间后），
+    // 每次调用都检查并恢复，否则会出现「播放完再播放/弹琴键无声」的问题
+    if (this.contextReady && Tone.getContext().state === 'running') return
     // WebAudio 规则：必须在用户手势之后才能 resume
     await Tone.start()
     this.buildGraph()
@@ -757,10 +759,21 @@ class AudioEngine {
 
   private disposeClipPlayers(): void {
     for (const item of this.clipPlayers) {
-      item.player.unsync()
-      item.player.dispose()
-      item.pitch?.dispose()
-      item.gain.dispose()
+      // 若片段正在发声，直接 dispose 会 abrupt 截断产生爆音，
+      // 先加 8ms 淡出再释放
+      const now = Tone.getContext().currentTime
+      item.gain.gain.cancelScheduledValues(now)
+      item.gain.gain.setValueAtTime(item.gain.gain.value, now)
+      item.gain.gain.linearRampToValueAtTime(0, now + 0.008)
+      const player = item.player
+      const gain = item.gain
+      const pitch = item.pitch
+      setTimeout(() => {
+        player.unsync()
+        player.dispose()
+        pitch?.dispose()
+        gain.dispose()
+      }, 20)
     }
     this.clipPlayers = []
   }
@@ -950,6 +963,8 @@ class AudioEngine {
 
   /** 立即触发（用于屏幕键盘，使用 currentTime 降低延迟） */
   previewAttack(trackId: string, midi: number, velocity = 0.85): void {
+    // 浏览器可能自动挂起 AudioContext，先恢复再发声
+    void Tone.start()
     const channel = this.channels.get(trackId)
     if (!channel || !channel.instrument) return
     const now = Tone.getContext().currentTime
@@ -971,6 +986,7 @@ class AudioEngine {
    * 避免写下音符后声音一直挂着不释放。
    */
   previewNote(trackId: string, midi: number, velocity = 0.85): void {
+    void Tone.start()
     const channel = this.channels.get(trackId)
     if (!channel || !channel.instrument) return
     const now = Tone.getContext().currentTime
@@ -981,6 +997,7 @@ class AudioEngine {
   /** 试听一个自定义音源采样（按原始音高原速播放） */
   previewSample(key: string): void {
     if (!this.graphReady) return
+    void Tone.start()
     const buffer = this.clipBuffer(key)
     if (!buffer) return
     const player = new Tone.Player(buffer)
@@ -991,6 +1008,7 @@ class AudioEngine {
 
   /** 试听一段音频片段（波形编辑器里点击片段头部播放） */
   previewClip(trackId: string, key: string, offset: number, duration: number): void {
+    void Tone.start()
     const channel = this.channels.get(trackId)
     if (!channel || channel.kind !== 'audio') return
     const buffer = this.clipBuffer(key)
@@ -1016,6 +1034,7 @@ class AudioEngine {
    */
   previewVoice(type: InstrumentType, project: Project, customInstrumentId = '', quick = false): void {
     if (!this.graphReady) return
+    void Tone.start()
     const custom =
       type === 'custom' ? this.resolveCustomInstrument(project, customInstrumentId) : null
     const drum = isDrumTrack(type, custom?.kind)
@@ -1231,18 +1250,14 @@ class AudioEngine {
       node.setValueAtTime(first.value, time)
     }, beatsToTicks(first.beat, ppq))
     if (eventIds) eventIds.push(anchor)
-    let prev = first
     for (let i = 1; i < lane.points.length; i += 1) {
       const point = lane.points[i]
-      const from = prev.value
-      const to = point.value
       const id = transport.schedule((time: number) => {
-        // 先把上一段的目标值锚住，再斜坡到本点，保证线性插值有确定的起点
-        node.setValueAtTime(from, time)
-        node.linearRampToValueAtTime(to, time)
+        // WebAudio 的 linearRampToValueAtTime 会自动从上一事件值斜坡到目标值，
+        // 同一时间点先 set 再 ramp 会产生阶跃爆音
+        node.linearRampToValueAtTime(point.value, time)
       }, beatsToTicks(point.beat, ppq))
       if (eventIds) eventIds.push(id)
-      prev = point
     }
   }
 
