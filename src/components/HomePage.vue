@@ -51,7 +51,7 @@ const changelog: { date: string; title: string; items: string[] }[] = [
     title: '品牌更名',
     items: [
       '产品名称由 TonePome 更名为 Loopa：主页标题、顶栏品牌、关于页与页面标题同步更新',
-      '品牌 LOGO 资源与站内引用一并更名；本地工程数据与部署路径保持不变，老数据可直接继续使用'
+      '品牌 LOGO 与仓库链接、GitHub Pages 部署子路径同步改为 Loopa；本地工程数据存储键保持不变，老数据可直接继续使用'
     ]
   },
   {
@@ -515,8 +515,8 @@ function formatTime(timestamp: number): string {
               </p>
               <p class="about-meta">Vue 3 · TypeScript · Tone.js · Canvas</p>
               <p class="about-meta">
-                <a class="about-link" href="https://github.com/GrantPome/TonePome" target="_blank" rel="noopener">
-                  github.com/GrantPome/TonePome
+                <a class="about-link" href="https://github.com/GrantPome/Loopa" target="_blank" rel="noopener">
+                  github.com/GrantPome/Loopa
                 </a>
               </p>
             </section>

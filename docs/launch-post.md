@@ -30,7 +30,7 @@
 
 换句话说，我没有因为它是个网页就砍掉功能，而是尽量把它做得像你桌面上那款软件——**只是它不用安装、不用登录、换台设备也能立刻接着做。**
 
-**▶ 打开即用（免登录、免下载）：** <https://grantpome.github.io/TonePome/>
+**▶ 打开即用（免登录、免下载）：** <https://grantpome.github.io/Loopa/>
 
 > 第一次点击页面才会出声，浏览器策略限制 🎧
 
@@ -50,6 +50,6 @@
 - 💻 比桌面软件轻，比多数网页 DAW 完整：免安装、免登录、免费导出 WAV
 - 🔄 换台设备打开浏览器就能接着做
 
-👉 <https://grantpome.github.io/TonePome/>
+👉 <https://grantpome.github.io/Loopa/>
 
 `#音乐制作` `#网页应用` `#开源` `#DAW`
