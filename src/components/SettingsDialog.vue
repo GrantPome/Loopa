@@ -180,7 +180,7 @@ function onOpenInstruments(): void {
       </div>
 
       <footer class="foot">
-        <span class="tip">Muisc Editor · 网页版库乐队</span>
+        <span class="tip">Loopa · 网页版库乐队</span>
         <button class="primary" @click="onClose">完成</button>
       </footer>
     </div>
