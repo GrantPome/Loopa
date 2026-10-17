@@ -19,7 +19,6 @@ import {
   importProjectJson,
   exportMidi,
   importMidiFile,
-  exportWav,
   openSettings,
   renameProject,
   setBpm,
@@ -28,6 +27,7 @@ import {
   toggleMetronome,
   toggleCountIn,
   toggleLoop,
+  toggleMidiRecordArmed,
   togglePlay,
   toggleRecording,
   redo,
@@ -40,7 +40,11 @@ import { layoutUi } from '@/core/layout'
 import { useSegThumb } from '@/core/segThumb'
 import { beatsPerBarOf, formatPosition } from '@/utils/music'
 
-const emit = defineEmits<{ (e: 'open-history'): void; (e: 'open-home'): void }>()
+const emit = defineEmits<{
+  (e: 'open-history'): void
+  (e: 'open-home'): void
+  (e: 'open-export'): void
+}>()
 
 const jsonInput = ref<HTMLInputElement | null>(null)
 const midiInput = ref<HTMLInputElement | null>(null)
@@ -108,10 +112,9 @@ const menus = computed<MenuDef[]>(() => [
       { label: '导出工程 JSON', desc: '完整工程数据，可再次导入', action: exportProjectJson },
       { label: '导出 MIDI', desc: '仅 MIDI 轨，导出 .mid 文件', action: exportMidi },
       {
-        label: state.busy ? '渲染中…' : '导出 WAV',
-        desc: '离线渲染完整混音为音频',
-        action: () => void exportWav(),
-        disabled: state.busy
+        label: '导出 WAV…',
+        desc: '打开导出对话框：范围 / 位深 / 采样率 / 分轨',
+        action: () => emit('open-export')
       }
     ]
   }
@@ -301,6 +304,14 @@ onBeforeUnmount(() => {
         @click="toggleRecording()"
       >
         ●
+      </button>
+      <button
+        class="icon"
+        :class="{ active: state.midiRecordArmed }"
+        :title="state.midiRecordArmed ? '关闭 MIDI 录制待命' : 'MIDI 录制待命：弹奏硬件键盘写入当前轨道'"
+        @click="toggleMidiRecordArmed"
+      >
+        ♪
       </button>
       <span v-if="state.recording" class="rec-time">{{ recordTime }}</span>
       <span v-else class="position" :class="{ counting: state.isCountingIn }">

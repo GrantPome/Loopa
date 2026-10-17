@@ -1,4 +1,4 @@
-import type { GridDivision, TimeSignature } from '@/types'
+import type { GridDivision, TempoPoint, TimeSignature } from '@/types'
 
 /** 音名表（升号记法） */
 export const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
@@ -127,4 +127,113 @@ export function gridLabel(grid: GridDivision): string {
     default:
       return '十六分音符'
   }
+}
+
+// ---------------------------------------------------------------- 速度自动化（tempo map）
+
+/** 速度断点：位置（拍）+ 该拍的目标速度 */
+export interface TempoBreakpoint {
+  beat: number
+  bpm: number
+}
+
+/**
+ * 断点表：以 [0, baseBpm] 为锚点，追加速度点（按拍排序、同拍去重、越界收敛）。
+ * 引擎的实时排期与离线渲染都以这张表为准，保证听感一致。
+ */
+export function tempoBreakpoints(points: TempoPoint[] | undefined, baseBpm: number): TempoBreakpoint[] {
+  const anchor: TempoBreakpoint = { beat: 0, bpm: clamp(Math.round(baseBpm) || 120, 40, 200) }
+  const list: TempoBreakpoint[] = [anchor]
+  const sorted = [...(points ?? [])].sort((a, b) => a.beat - b.beat)
+  for (const p of sorted) {
+    const beat = Number(p.beat)
+    const bpm = clamp(Math.round(Number(p.bpm) || anchor.bpm), 40, 200)
+    if (!Number.isFinite(beat) || beat <= 0) continue // 第 0 拍的速度由 baseBpm 决定
+    const last = list[list.length - 1]
+    if (Math.abs(last.beat - beat) < 1e-6) last.bpm = bpm
+    else list.push({ beat: roundBeat(beat), bpm })
+  }
+  return list
+}
+
+/**
+ * 一个速度段（从 v0 线性过渡到 v1）跨越 deltaBeats 拍所需的秒数。
+ * 采用梯形模型：段内平均速度取 (v0+v1)/2，即 T = Δ拍 × 120 / (v0+v1)。
+ * 该模型与 Tone.Transport 对 bpm 参数做 linearRamp（随时间线性）的积分结果完全一致，
+ * 因此按这个时长排期斜坡后，Transport 到达下一断点时的拍位恰好对齐。
+ */
+function tempoSegmentSeconds(deltaBeats: number, v0: number, v1: number): number {
+  if (deltaBeats <= 0) return 0
+  if (v0 === v1) return deltaBeats * 60 / v0
+  return deltaBeats * 120 / (v0 + v1)
+}
+
+/**
+ * 段内速度线性变化时，走完 targetBeats 拍需要的秒数（解二次方程，段内精确解）。
+ * v(x) = v0 + (v1-v0)·x/T，已走拍数 = ∫v dx = v0·x + (v1-v0)·x²/(2T)。
+ */
+function tempoPartialSeconds(targetBeats: number, v0: number, v1: number, segSeconds: number): number {
+  if (targetBeats <= 0) return 0
+  if (v0 === v1 || segSeconds <= 0) return targetBeats * 60 / v0
+  const k = (v1 - v0) / segSeconds // bpm 每秒变化率
+  const disc = Math.max(0, v0 * v0 + 2 * k * targetBeats)
+  const x = (-v0 + Math.sqrt(disc)) / k
+  return clamp(x, 0, segSeconds)
+}
+
+/** 第 0 拍到 beat 拍的真实时长（秒，考虑速度曲线）；beat 超出最后断点时按末速度匀速 */
+export function beatsToSecondsAt(beat: number, points: TempoPoint[] | undefined, baseBpm: number): number {
+  const bps = tempoBreakpoints(points, baseBpm)
+  if (beat <= 0) return 0
+  let seconds = 0
+  let prevBeat = 0
+  let v0 = bps[0].bpm
+  for (let i = 1; i < bps.length && bps[i].beat <= beat; i += 1) {
+    seconds += tempoSegmentSeconds(bps[i].beat - prevBeat, v0, bps[i].bpm)
+    prevBeat = bps[i].beat
+    v0 = bps[i].bpm
+  }
+  // 尾段：从最后一个已覆盖断点匀速 / 变速走到目标拍
+  const next = bps.find((bp) => bp.beat > beat)
+  if (next) {
+    const seg = tempoSegmentSeconds(next.beat - prevBeat, v0, next.bpm)
+    seconds += tempoPartialSeconds(beat - prevBeat, v0, next.bpm, seg)
+  } else {
+    seconds += (beat - prevBeat) * 60 / v0
+  }
+  return seconds
+}
+
+/** 从 fromBeat 到 toBeat 经历的真实时长（秒，考虑速度曲线） */
+export function secondsBetweenBeats(
+  fromBeat: number,
+  toBeat: number,
+  points: TempoPoint[] | undefined,
+  baseBpm: number
+): number {
+  if (toBeat <= fromBeat) return 0
+  return beatsToSecondsAt(toBeat, points, baseBpm) - beatsToSecondsAt(fromBeat, points, baseBpm)
+}
+
+/** 某一拍上的瞬时速度（BPM）：段内按模型插值，仅用于显示与音符时长估算 */
+export function bpmAtBeat(beat: number, points: TempoPoint[] | undefined, baseBpm: number): number {
+  const bps = tempoBreakpoints(points, baseBpm)
+  if (beat <= 0 || bps.length === 1) return bps[0].bpm
+  let prevBeat = 0
+  let v0 = bps[0].bpm
+  for (let i = 1; i < bps.length; i += 1) {
+    const bp = bps[i]
+    if (bp.beat <= beat) {
+      prevBeat = bp.beat
+      v0 = bp.bpm
+      continue
+    }
+    // beat 落在 prevBeat 与 bp.beat 之间：求段内瞬时速度
+    const seg = tempoSegmentSeconds(bp.beat - prevBeat, v0, bp.bpm)
+    const x = tempoPartialSeconds(beat - prevBeat, v0, bp.bpm, seg)
+    if (seg <= 0 || v0 === bp.bpm) return v0
+    const k = (bp.bpm - v0) / seg
+    return clamp(v0 + k * x, 40, 200)
+  }
+  return v0
 }

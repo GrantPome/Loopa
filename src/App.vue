@@ -12,6 +12,7 @@ import HomePage from './components/HomePage.vue'
 import ProjectDialog from './components/ProjectDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import InstrumentDialog from './components/InstrumentDialog.vue'
+import ExportDialog from './components/ExportDialog.vue'
 import { layout, layoutUi, resetLayout, setEditMode } from '@/core/layout'
 import {
   activeTrack,
@@ -20,6 +21,8 @@ import {
   deleteSelectedNotes,
   endRecording,
   ensureAudio,
+  handleMidiNoteOff,
+  handleMidiNoteOn,
   nudgeSelectedVelocity,
   pause,
   redo,
@@ -29,10 +32,13 @@ import {
   transposeSelectedNotes,
   undo
 } from '@/core/store'
+import { setMidiHandlers } from '@/core/midiInput'
 
 /** 主页（欢迎页）开关：首次打开站点时先展示主页 */
 const homeOpen = ref(true)
 const historyOpen = ref(false)
+/** 导出音频对话框开关 */
+const exportOpen = ref(false)
 
 /** 主页「历史工程」：打开历史工程对话框 */
 function onOpenHistory(): void {
@@ -91,9 +97,10 @@ function onKeyDown(event: KeyboardEvent): void {
   if (layoutUi.editMode) return
 
   // 有弹窗打开时，除 Esc 外不响应主界面快捷键，避免在弹窗里误触发播放/删除等操作
-  if (state.instrumentOpen || state.settingsOpen || historyOpen.value) {
+  if (state.instrumentOpen || state.settingsOpen || historyOpen.value || exportOpen.value) {
     if (event.key === 'Escape') {
       historyOpen.value = false
+      exportOpen.value = false
       clearNoteSelection()
     }
     return
@@ -141,6 +148,8 @@ function onKeyDown(event: KeyboardEvent): void {
 onMounted(() => {
   window.addEventListener('pointerdown', onFirstGesture)
   window.addEventListener('keydown', onKeyDown)
+  // MIDI 硬件音符 → 试听 + 录制（是否录制取决于顶栏「♪」待命状态）
+  setMidiHandlers(handleMidiNoteOn, handleMidiNoteOff)
 })
 
 onBeforeUnmount(() => {
@@ -159,7 +168,11 @@ onBeforeUnmount(() => {
     />
 
     <template v-else>
-      <TopToolbar @open-history="historyOpen = true" @open-home="onOpenHome" />
+      <TopToolbar
+        @open-history="historyOpen = true"
+        @open-home="onOpenHome"
+        @open-export="exportOpen = true"
+      />
 
       <!-- 布局编辑模式提示条 -->
       <div v-if="layoutUi.editMode" class="edit-banner">
@@ -180,6 +193,7 @@ onBeforeUnmount(() => {
     </template>
 
     <ProjectDialog :open="historyOpen" @close="historyOpen = false" />
+    <ExportDialog :open="exportOpen" @close="exportOpen = false" />
     <Transition name="mask-fade">
       <SettingsDialog v-if="state.settingsOpen" />
     </Transition>

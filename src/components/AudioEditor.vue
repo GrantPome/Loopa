@@ -24,6 +24,8 @@ import {
   selectAudioClip,
   setClipFade,
   setClipGain,
+  setClipPitch,
+  setClipWarp,
   splitClip,
   seek,
   state
@@ -278,6 +280,20 @@ function onFadeInput(edge: 'in' | 'out', event: Event): void {
   setClipFade(t.id, c.id, edge, Number((event.target as HTMLInputElement).value))
 }
 
+function onWarpToggle(event: Event): void {
+  const c = clip.value
+  const t = track.value
+  if (!c || !t) return
+  setClipWarp(t.id, c.id, (event.target as HTMLInputElement).checked)
+}
+
+function onPitchInput(event: Event): void {
+  const c = clip.value
+  const t = track.value
+  if (!c || !t) return
+  setClipPitch(t.id, c.id, Number((event.target as HTMLInputElement).value))
+}
+
 function onSplit(): void {
   const c = clip.value
   const t = track.value
@@ -405,6 +421,26 @@ watch(
           @input="onFadeInput('out', $event)"
         />
         <span class="value">{{ clip.fadeOut.toFixed(2) }}</span>
+      </label>
+
+      <label class="ctrl" title="开启后片段随工程速度伸缩对齐（BPM 变了片段跟着变）">
+        <span class="label">变速对齐</span>
+        <input type="checkbox" :checked="clip.warp" @change="onWarpToggle" />
+        <span class="value">{{ clip.warp ? '开' : '关' }}</span>
+      </label>
+
+      <label class="ctrl">
+        <span class="label">移调</span>
+        <input
+          type="range"
+          min="-24"
+          max="24"
+          step="1"
+          :value="clip.pitchShift"
+          title="整体移调（半音）"
+          @input="onPitchInput"
+        />
+        <span class="value">{{ clip.pitchShift > 0 ? '+' : '' }}{{ clip.pitchShift }}</span>
       </label>
 
       <span class="info">

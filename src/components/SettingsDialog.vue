@@ -3,14 +3,17 @@
  * 设置对话框
  * - 设备模式：PC / Pad 手动切换
  * - Pad 专属设置：长按时长、虚拟键盘常驻
- * - 界面偏好：音量读数单位、力度条默认展开等
+ * - MIDI 输入：启用 Web MIDI、选择输入设备
+ * - 速度自动化：速度点列表管理
  * 打开方式：顶部工具栏「设置」按钮
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { DeviceMode } from '@/types'
 import {
+  addTempoPoint,
   closeSettings,
   openInstrumentManager,
+  removeTempoPoint,
   setDeviceMode,
   setLongPressDuration,
   state,
@@ -19,6 +22,7 @@ import {
   toggleVelocityLane,
   toggleVolumeDisplay
 } from '@/core/store'
+import { midiState, disableMidi, enableMidi, selectMidiDevice } from '@/core/midiInput'
 import { resetLayout, setEditMode } from '@/core/layout'
 
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -65,6 +69,29 @@ function onOpenInstruments(): void {
   closeSettings()
   openInstrumentManager()
   emit('close')
+}
+
+// ------------------------------------------------------------ MIDI 输入
+
+/** 启用 / 断开 Web MIDI */
+async function onToggleMidi(): Promise<void> {
+  if (midiState.enabled) disableMidi()
+  else await enableMidi()
+}
+
+/** 切换监听的 MIDI 输入设备 */
+function onMidiDeviceChange(event: Event): void {
+  selectMidiDevice((event.target as HTMLSelectElement).value)
+}
+
+// ------------------------------------------------------------ 速度自动化
+
+/** 新增速度点时使用的 BPM（默认与工程速度一致） */
+const tempoBpmInput = ref(state.project.bpm)
+
+/** 在当前播放头位置添加速度点 */
+function onAddTempoPoint(): void {
+  addTempoPoint(state.playheadBeats, tempoBpmInput.value)
 }
 </script>
 
@@ -162,6 +189,60 @@ function onOpenInstruments(): void {
               {{ state.noteColorByVelocity ? '开' : '关' }}
             </button>
           </label>
+        </section>
+
+        <section class="group">
+          <h3>MIDI 输入</h3>
+          <p class="desc">
+            连接硬件 MIDI 键盘：弹奏即可试听当前轨道音色；点顶栏「♪」进入录制待命后，弹奏的音符会写进当前轨道。
+          </p>
+          <div class="row layout-row">
+            <button :class="{ primary: !midiState.enabled }" @click="onToggleMidi">
+              {{ midiState.enabled ? '断开 MIDI' : '启用 MIDI 输入' }}
+            </button>
+          </div>
+          <p v-if="midiState.error" class="hint error">{{ midiState.error }}</p>
+          <template v-if="midiState.enabled">
+            <label class="row">
+              <span class="label">输入设备</span>
+              <select class="device-select" :value="midiState.selectedId" @change="onMidiDeviceChange">
+                <option value="">全部输入设备</option>
+                <option v-for="device in midiState.devices" :key="device.id" :value="device.id">
+                  {{ device.name }}
+                </option>
+              </select>
+            </label>
+            <p class="hint">
+              {{ midiState.devices.length > 0 ? `检测到 ${midiState.devices.length} 个输入设备` : '未检测到输入设备，请连接后重试' }}
+            </p>
+          </template>
+          <p v-else-if="!midiState.supported" class="hint error">当前浏览器不支持 Web MIDI，请使用 Chrome / Edge。</p>
+        </section>
+
+        <section class="group">
+          <h3>速度自动化</h3>
+          <p class="desc">
+            在工程中途改变速度：第 0 拍的速度由顶部工具栏的 BPM 决定，之后可插入任意多个速度点，播放与导出都会按曲线平滑变速。
+          </p>
+          <div class="row layout-row">
+            <input
+              class="tempo-bpm"
+              type="number"
+              min="40"
+              max="200"
+              v-model.number="tempoBpmInput"
+              title="新速度点的 BPM"
+            />
+            <button class="primary" @click="onAddTempoPoint">在播放头添加速度点</button>
+          </div>
+          <div v-if="state.project.tempoPoints.length" class="tempo-list">
+            <div v-for="point in state.project.tempoPoints" :key="point.id" class="tempo-item">
+              <span>第 {{ Math.round(point.beat * 100) / 100 }} 拍</span>
+              <span class="dim">{{ point.bpm }} BPM</span>
+              <button class="danger" title="删除该速度点" @click="removeTempoPoint(point.id)">删除</button>
+            </div>
+          </div>
+          <p v-else class="hint">还没有速度点，整首工程使用固定速度。</p>
         </section>
 
         <section class="group">
@@ -275,6 +356,46 @@ function onOpenInstruments(): void {
 
 .device-select {
   padding: 5px 8px;
+}
+
+/* 速度点列表 */
+.tempo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.tempo-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  font-size: 12px;
+}
+
+.tempo-item .dim {
+  flex: 1;
+  color: var(--text-dim);
+}
+
+.tempo-item .danger {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.tempo-bpm {
+  width: 84px;
+  padding: 5px 8px;
+}
+
+.hint.error {
+  color: var(--accent-2);
+  font-style: normal;
 }
 
 /* 布局操作按钮行 */

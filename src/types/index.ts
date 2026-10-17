@@ -140,6 +140,14 @@ export interface AudioClip {
   fadeIn: number
   /** 淡出时长（拍） */
   fadeOut: number
+  /**
+   * 是否按工程速度对齐（warp）：
+   * 开启后片段以变速率重采样铺满片段时长，工程改速度时片段跟随伸缩；
+   * 关闭时按原始速度播放（经典「磁带」模式）。
+   */
+  warp: boolean
+  /** 半音移调量 -24~24，0 为原始音高（与 warp 变速率带来的音高变化叠加） */
+  pitchShift: number
   /** 波形峰值缓存：按时间均匀采样，元素为归一化的 [min,max] 交替值（-1~1） */
   peaks: number[]
 }
@@ -385,6 +393,14 @@ export interface AutomationLane {
   points: AutomationPoint[]
 }
 
+/**
+ * 自动化写入模式（播放时拖推子/旋钮录制参数变化）：
+ * - off：不写入
+ * - touch：只写入已有曲线的参数
+ * - latch：写入且参数还没有曲线时自动新建一条
+ */
+export type AutomationWriteMode = 'off' | 'touch' | 'latch'
+
 // ---------------------------------------------------------------- 音阶锁定
 
 /** 音阶类型（根音之外的音程结构，单位：半音） */
@@ -538,6 +554,19 @@ export interface TimelineMarker {
   label: string
 }
 
+/**
+ * 速度自动化关键点：
+ * 相邻两点之间速度按时间线性过渡（梯形模型），
+ * 工程起点（第 0 拍）的速度始终取 Project.bpm，因此点的位置必须大于 0。
+ */
+export interface TempoPoint {
+  id: string
+  /** 位置（拍），> 0 */
+  beat: number
+  /** 该拍的目标速度（BPM，40~200） */
+  bpm: number
+}
+
 /** 工程（可序列化为 JSON 存 localStorage / 导出文件） */
 export interface Project {
   id: string
@@ -560,6 +589,8 @@ export interface Project {
   scale: ScaleSetting
   /** 时间轴标记点（标点 / 卡点），按位置升序存放 */
   markers: TimelineMarker[]
+  /** 速度自动化关键点（空数组表示恒定速度），按位置升序存放 */
+  tempoPoints: TempoPoint[]
   createdAt: number
   updatedAt: number
 }

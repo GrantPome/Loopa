@@ -3,6 +3,7 @@ import type {
   AudioClip,
   AutomationLane,
   AutomationParam,
+  AutomationWriteMode,
   CustomInstrument,
   CustomInstrumentKind,
   CustomSample,
@@ -18,6 +19,7 @@ import type {
   DeviceMode,
   ScaleSetting,
   ScaleType,
+  TempoPoint,
   TimeSignature,
   TimelineMarker,
   Track,
@@ -50,7 +52,9 @@ import {
   MAX_MIDI,
   MIN_MIDI,
   beatsPerBarOf,
+  bpmAtBeat,
   clamp,
+  midiToNoteName,
   roundBeat,
   secondsToBeats,
   snapTo,
@@ -131,6 +135,10 @@ export interface AppState {
   automationLaneOn: boolean
   /** 当前正在编辑的自动化参数 */
   automationParam: AutomationParam
+  /** 自动化写入模式：off 关闭 / touch 仅写已有曲线 / latch 允许新建曲线 */
+  automationWriteMode: AutomationWriteMode
+  /** MIDI 硬件录制待命（armed）：弹奏硬件键盘即写入当前轨道 */
+  midiRecordArmed: boolean
   /** 音阶锁定是否开启（开启后写谱与拖动音符都会吸附到工程音阶） */
   scaleLockOn: boolean
   /** 音符是否按力度着色（低力度冷色、高力度暖色） */
@@ -187,6 +195,7 @@ export function createEmptyProject(name = '未命名工程'): Project {
     // 默认不锁定音阶（十二平均律），由用户在钢琴卷帘里显式开启
     scale: { root: 48, type: 'chromatic' },
     markers: [],
+    tempoPoints: [],
     createdAt: now,
     updatedAt: now
   }
@@ -323,6 +332,9 @@ function normalizeClips(raw: unknown): AudioClip[] {
       gain: clamp(Number(item.gain ?? 1) || 0, 0, 2),
       fadeIn: Math.max(0, Number(item.fadeIn) || 0),
       fadeOut: Math.max(0, Number(item.fadeOut) || 0),
+      // 变速对齐与移调是后来加入的字段：旧数据统一回退「原速原调」
+      warp: Boolean(item.warp),
+      pitchShift: clamp(Number(item.pitchShift) || 0, -24, 24),
       peaks: Array.isArray(item.peaks) ? (item.peaks as number[]) : []
     })
   }
@@ -456,6 +468,7 @@ export function normalizeProject(raw: Partial<Project>, fallbackName = '未命�
     customInstruments,
     scale: normalizeScale(raw.scale),
     markers: normalizeMarkers(raw.markers),
+    tempoPoints: normalizeTempoPoints(raw.tempoPoints),
     createdAt: raw.createdAt ?? base.createdAt,
     updatedAt: raw.updatedAt ?? base.updatedAt
   }
@@ -466,6 +479,23 @@ function normalizeScale(raw: unknown): ScaleSetting {
   const item = raw as Partial<ScaleSetting> | undefined
   const type = item?.type && SCALE_DEF_MAP[item.type] ? (item.type as ScaleType) : 'chromatic'
   return { root: clamp(Math.round(Number(item?.root ?? 48) || 48), 48, 59), type }
+}
+
+/**
+ * 速度点归一化：过滤非法项（拍号 ≤ 0、速度越界）、按拍排序并去掉几乎重合的点。
+ * 第 0 拍的速度由 Project.bpm 决定，不存进 tempoPoints。
+ */
+function normalizeTempoPoints(raw: unknown): TempoPoint[] {
+  if (!Array.isArray(raw)) return []
+  const out: TempoPoint[] = []
+  for (const item of raw as Partial<TempoPoint>[]) {
+    const beat = Number(item?.beat)
+    if (!Number.isFinite(beat) || beat <= 0.001) continue
+    const bpm = clamp(Math.round(Number(item?.bpm) || 0), 40, 200)
+    if (out.length > 0 && Math.abs(out[out.length - 1].beat - beat) < 0.001) continue
+    out.push({ id: item?.id ?? uid('tmp'), beat, bpm })
+  }
+  return out.sort((a, b) => a.beat - b.beat)
 }
 
 /**
@@ -583,6 +613,8 @@ export const state = reactive<AppState>({
   velocityLaneOn: initialUiPrefs.velocityLaneOn,
   automationLaneOn: false,
   automationParam: 'volume',
+  automationWriteMode: 'off',
+  midiRecordArmed: false,
   scaleLockOn: false,
   noteColorByVelocity: initialUiPrefs.noteColorByVelocity,
   keyboardVelocity: 0.85,
@@ -965,8 +997,11 @@ export function setTrackVolume(id: string, volume: number): void {
   if (!track) return
   track.volume = clamp(volume, 0, 1)
   engine.updateMix(track, state.project.tracks)
-  record('调整音量', `vol:${id}`)
-  persistOnly()
+  // 自动化写入模式下，推子动作同时落进曲线；返回 true 时历史记录由写入逻辑负责
+  if (!maybeWriteAutomation(track, 'volume', track.volume)) {
+    record('调整音量', `vol:${id}`)
+    persistOnly()
+  }
 }
 
 export function setTrackPan(id: string, pan: number): void {
@@ -974,8 +1009,10 @@ export function setTrackPan(id: string, pan: number): void {
   if (!track) return
   track.pan = clamp(pan, -1, 1)
   engine.updateMix(track, state.project.tracks)
-  record('调整声像', `pan:${id}`)
-  persistOnly()
+  if (!maybeWriteAutomation(track, 'pan', track.pan)) {
+    record('调整声像', `pan:${id}`)
+    persistOnly()
+  }
 }
 
 /** 调整某个均衡频段（dB） */
@@ -984,8 +1021,10 @@ export function setTrackEq(id: string, band: EqBand, value: number): void {
   if (!track) return
   track[band] = clamp(value, EQ_MIN, EQ_MAX)
   engine.setTrackEq(id, band, track[band])
-  record('调整均衡', `eq:${id}:${band}`)
-  persistOnly()
+  if (!maybeWriteAutomation(track, band, track[band])) {
+    record('调整均衡', `eq:${id}:${band}`)
+    persistOnly()
+  }
 }
 
 /** 调整混响发送量（0~1） */
@@ -994,8 +1033,10 @@ export function setTrackReverbSend(id: string, value: number): void {
   if (!track) return
   track.reverbSend = clamp(value, 0, 1)
   engine.setTrackReverbSend(id, track.reverbSend)
-  record('调整混响发送', `send:${id}`)
-  persistOnly()
+  if (!maybeWriteAutomation(track, 'reverbSend', track.reverbSend)) {
+    record('调整混响发送', `send:${id}`)
+    persistOnly()
+  }
 }
 
 /** 把某条轨道的均衡与发送一键复位 */
@@ -1049,6 +1090,84 @@ function finishAutomation(track: Track, label: string, coalesceKey = ''): void {
   engine.updateTrackAutomation(track)
   record(label, coalesceKey)
   commit()
+}
+
+/** 切换自动化写入模式（off / touch / latch），供钢琴卷帘工具条调用 */
+export function setAutomationWriteMode(mode: AutomationWriteMode): void {
+  state.automationWriteMode = mode
+}
+
+/** 曲线在某一拍的线性插值（写入前用于「钉住」原值，避免写入起点被斜坡提前拉走） */
+function curveValueAt(lane: AutomationLane, beat: number): number {
+  const pts = lane.points
+  if (pts.length === 0) return 0
+  if (beat <= pts[0].beat) return pts[0].value
+  for (let i = 1; i < pts.length; i += 1) {
+    if (beat <= pts[i].beat) {
+      const a = pts[i - 1]
+      const b = pts[i]
+      const t = b.beat > a.beat ? (beat - a.beat) / (b.beat - a.beat) : 1
+      return a.value + (b.value - a.value) * t
+    }
+  }
+  return pts[pts.length - 1].value
+}
+
+/**
+ * 自动化写入（Touch / Latch）：播放中调整推子 / 旋钮时，把动作实时落进曲线。
+ * - touch：只写入已有曲线的参数，不会新建曲线
+ * - latch：没有曲线的参数也会从无到有新建一条
+ * 返回是否发生了写入（写入时历史记录 / 持久化由本函数负责，调用方跳过自己的 record）。
+ */
+function maybeWriteAutomation(track: Track, param: AutomationParam, value: number): boolean {
+  if (state.automationWriteMode === 'off' || !state.isPlaying) return false
+  let lane = automationLane(track, param)
+  if (!lane && state.automationWriteMode === 'touch') return false
+  const def = AUTOMATION_PARAM_MAP[param]
+  const safeValue = clamp(value, def.min, def.max)
+  // 先让当前值在播放中立即生效（绕过「有曲线的参数不写静态值」的规则）
+  engine.writeParamLive(track.id, param, safeValue)
+  const beat = Math.max(0, state.playheadBeats)
+  const range = def.max - def.min
+
+  if (!lane) {
+    // latch 新建曲线：先落两个几乎重合的点（满足「曲线至少两个点」的归一化规则）
+    lane = {
+      param,
+      points: [
+        { id: uid('apt'), beat: Math.max(0, beat - 0.01), value: safeValue },
+        { id: uid('apt'), beat, value: safeValue }
+      ]
+    }
+    track.automation.push(lane)
+  } else {
+    const pts = lane.points
+    const last = pts[pts.length - 1]
+    const existing = pts.find((p) => Math.abs(p.beat - beat) < 0.005)
+    if (beat - last.beat > 0.05 && !existing) {
+      // 写入刚从空闲进入活跃：先在当前拍钉住曲线原值，让「此前的形状」保持到写入点
+      const held = curveValueAt(lane, beat)
+      if (Math.abs(held - last.value) > range * 0.001) {
+        pts.push({ id: uid('apt'), beat: Math.max(0, beat - 0.001), value: held })
+      }
+    }
+    if (existing) {
+      existing.value = safeValue
+    } else {
+      const last2 = pts[pts.length - 1]
+      // 值变化超过量程 2% 落点；值基本不动时每 0.5 拍补一个平点，把曲线钉平
+      if (Math.abs(last2.value - safeValue) > range * 0.02 || beat - last2.beat >= 0.5) {
+        pts.push({ id: uid('apt'), beat, value: safeValue })
+      }
+    }
+    pts.sort((a, b) => a.beat - b.beat)
+  }
+
+  engine.updateTrackAutomation(track)
+  persistOnly()
+  record(`写入自动化：${def.label}`, `aw:${track.id}:${param}`)
+  commit()
+  return true
 }
 
 /** 新增一个自动化关键点（同一拍已有则覆盖其数值） */
@@ -1688,6 +1807,8 @@ export async function createClipFromPcm(
     gain: 1,
     fadeIn: 0,
     fadeOut: 0,
+    warp: false,
+    pitchShift: 0,
     peaks: computePeaks(pcm.channels)
   }
 
@@ -1750,6 +1871,30 @@ export function setClipGain(trackId: string, clipId: string, gain: number): void
   if (!clip) return
   clip.gain = clamp(gain, 0, 2)
   record('调整片段增益', `clip:${clipId}:gain`)
+  commit()
+}
+
+/**
+ * 片段是否 warp 对齐工程速度：
+ * 开启后片段按工程速度拉伸（变速不变调补偿，磁带模式），
+ * 关闭则按原始速度播放（与工程速度可能不一致）。
+ */
+export function setClipWarp(trackId: string, clipId: string, warp: boolean): void {
+  const clip = state.project.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId)
+  if (!clip || clip.warp === warp) return
+  clip.warp = warp
+  record(warp ? '开启片段变速对齐' : '关闭片段变速对齐', `clip:${clipId}:warp`)
+  commit()
+}
+
+/** 片段移调（半音，-24 ~ 24）；0 表示原调 */
+export function setClipPitch(trackId: string, clipId: string, semitones: number): void {
+  const clip = state.project.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId)
+  if (!clip) return
+  const safe = clamp(Math.round(semitones), -24, 24)
+  if (clip.pitchShift === safe) return
+  clip.pitchShift = safe
+  record(`片段移调：${safe > 0 ? '+' : ''}${safe} 半音`, `clip:${clipId}:pitch`)
   commit()
 }
 
@@ -2178,6 +2323,54 @@ export function setBpm(bpm: number): void {
   commit()
 }
 
+// ------------------------------------------------------------ 速度自动化
+
+/** 当前播放头位置的速度（速度曲线插值） */
+export function bpmAtPlayhead(): number {
+  return bpmAtBeat(state.playheadBeats, state.project.tempoPoints, state.project.bpm)
+}
+
+/** 新增速度点；位置 ≈ 第 0 拍时等价于直接修改工程速度 */
+export function addTempoPoint(beat: number, bpm: number): void {
+  const safeBpm = clamp(Math.round(bpm), 40, 200)
+  const safeBeat = roundBeat(beat)
+  if (safeBeat <= 0.001) {
+    setBpm(safeBpm)
+    return
+  }
+  if (state.project.tempoPoints.some((p) => Math.abs(p.beat - safeBeat) < 0.001)) {
+    state.statusText = '该位置已有速度点'
+    return
+  }
+  state.project.tempoPoints.push({ id: uid('tmp'), beat: safeBeat, bpm: safeBpm })
+  state.project.tempoPoints.sort((a, b) => a.beat - b.beat)
+  engine.setTempoMap(state.project.tempoPoints, state.project.bpm)
+  record(`添加速度点：第 ${safeBeat} 拍 ${safeBpm} BPM`)
+  commit()
+}
+
+/** 调整速度点的位置或速度（拖拽时用同一 coalesceKey 合并历史） */
+export function updateTempoPoint(id: string, beat: number, bpm: number): void {
+  const point = state.project.tempoPoints.find((p) => p.id === id)
+  if (!point) return
+  point.beat = Math.max(0.001, roundBeat(beat))
+  point.bpm = clamp(Math.round(bpm), 40, 200)
+  state.project.tempoPoints.sort((a, b) => a.beat - b.beat)
+  engine.setTempoMap(state.project.tempoPoints, state.project.bpm)
+  record('调整速度点', `tmp:${id}`)
+  commit()
+}
+
+/** 删除速度点（第 0 拍速度回到工程 BPM，不可删除） */
+export function removeTempoPoint(id: string): void {
+  const index = state.project.tempoPoints.findIndex((p) => p.id === id)
+  if (index < 0) return
+  state.project.tempoPoints.splice(index, 1)
+  engine.setTempoMap(state.project.tempoPoints, state.project.bpm)
+  record('删除速度点')
+  commit()
+}
+
 export function setTimeSignature(ts: TimeSignature): void {
   if (state.project.timeSignature === ts) return
   state.project.timeSignature = ts
@@ -2338,12 +2531,15 @@ export async function play(): Promise<void> {
 }
 
 export function pause(): void {
+  // 暂停时把还没抬起的 MIDI 录音音符结算掉，避免恢复播放后时长被拉长
+  settleAllPendingMidi()
   engine.pause()
   state.isPlaying = false
   state.isCountingIn = false
 }
 
 export function stop(): void {
+  settleAllPendingMidi()
   engine.stop()
   state.isPlaying = false
   state.isCountingIn = false
@@ -2359,6 +2555,77 @@ export function seek(beats: number): void {
   const total = engine.projectLengthBeats(state.project)
   engine.seek(clamp(beats, 0, total))
   state.playheadBeats = engine.getBeats()
+}
+
+// ------------------------------------------------------------ MIDI 硬件输入录制
+
+/** 进行中的 MIDI 录音音符：等待 note off 结算时长 */
+interface PendingMidiNote {
+  noteId: string
+  region: Region
+}
+
+/** 键为 MIDI 音号；同一音号重复按下时以最后一次为准 */
+const pendingMidiNotes = new Map<number, PendingMidiNote>()
+
+/** 切换 MIDI 录制待命（armed）：取消待命时结算所有未抬起的音符 */
+export function toggleMidiRecordArmed(): void {
+  state.midiRecordArmed = !state.midiRecordArmed
+  if (!state.midiRecordArmed) settleAllPendingMidi()
+}
+
+/**
+ * MIDI 硬件 note on：先试听当前轨道音色；
+ * 待命时把音符写进当前轨道（时长先给最小值，note off 后按播放头结算）。
+ */
+export function handleMidiNoteOn(midi: number, velocity: number): void {
+  const track = activeTrack()
+  if (!track || track.kind !== 'midi') return
+  const safeMidi = clamp(Math.round(midi), MIN_MIDI, MAX_MIDI)
+  previewAttack(track.id, safeMidi, clamp(velocity, 0.05, 1))
+  if (!state.midiRecordArmed) return
+  const region = activeRegion()
+  if (!region) return
+  const note: Note = {
+    id: uid('note'),
+    midi: safeMidi,
+    start: Math.max(0, state.playheadBeats),
+    duration: 0.25,
+    velocity: clamp(velocity, VELOCITY_MIN, VELOCITY_MAX)
+  }
+  region.notes.push(note)
+  ensureBarsForBeat(note.start + note.duration)
+  pendingMidiNotes.set(midi, { noteId: note.id, region })
+  commit()
+}
+
+/** MIDI 硬件 note off：按当前播放头结算音符时长 */
+export function handleMidiNoteOff(midi: number): void {
+  const pending = pendingMidiNotes.get(midi)
+  if (!pending) return
+  pendingMidiNotes.delete(midi)
+  const note = pending.region.notes.find((n) => n.id === pending.noteId)
+  if (!note) return
+  const end = Math.max(note.start + 0.125, state.playheadBeats)
+  note.duration = roundBeat(end - note.start)
+  ensureBarsForBeat(note.start + note.duration)
+  record(`MIDI 录入：${midiToNoteName(midi)}`, 'midiRec')
+  commit()
+}
+
+/** 播放停止 / 暂停 / 取消待命时，结算所有尚未抬起的录音音符 */
+function settleAllPendingMidi(): void {
+  if (pendingMidiNotes.size === 0) return
+  const end = Math.max(0, state.playheadBeats)
+  for (const pending of pendingMidiNotes.values()) {
+    const note = pending.region.notes.find((n) => n.id === pending.noteId)
+    if (!note) continue
+    note.duration = roundBeat(Math.max(note.start + 0.125, end) - note.start)
+    ensureBarsForBeat(note.start + note.duration)
+  }
+  pendingMidiNotes.clear()
+  record('MIDI 录入', 'midiRec')
+  commit()
 }
 
 // ---------------------------------------------------------------- 时间轴标记点（标点 / 卡点）
@@ -2786,18 +3053,85 @@ export async function importMidiFile(file: File): Promise<void> {
   }
 }
 
-/** 渲染并导出 WAV */
-export async function exportWav(): Promise<void> {
+/** WAV 导出选项（导出对话框使用） */
+export interface ExportWavOptions {
+  /** 起始小节（0 基），缺省从第 1 小节开始 */
+  fromBar?: number
+  /** 结束小节（不含），缺省到工程末尾 */
+  toBar?: number
+  /** 位深：16 或 24，默认 16 */
+  bitDepth?: 16 | 24
+  /** 采样率（Hz），缺省跟随浏览器音频上下文 */
+  sampleRate?: number
+  /** 分轨导出：每条可发声轨道单独一个 wav 文件 */
+  stems?: boolean
+}
+
+/** 清理文件名里不允许出现的字符 */
+function sanitizeFileName(name: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'track'
+}
+
+/**
+ * 生成分轨导出用的工程副本：除目标轨及其编组祖先链外全部静音。
+ * 编组轨是子轨的信号通路，不能静音，否则子轨会跟着没声；
+ * 目标轨自身的静音状态被忽略，保证导出的分轨总有内容。
+ */
+function cloneProjectForStem(project: Project, keepTrackId: string): Project {
+  const inAncestorChain = (id: string): boolean => {
+    let cur = project.tracks.find((t) => t.id === keepTrackId)
+    while (cur) {
+      if (cur.id === id) return true
+      // 先取局部变量再查找，避免闭包捕获可空引用导致 TS 误报
+      const parentId = cur.parentId
+      cur = parentId ? project.tracks.find((t) => t.id === parentId) : undefined
+    }
+    return false
+  }
+  return {
+    ...project,
+    tracks: project.tracks.map((t) =>
+      t.id === keepTrackId || inAncestorChain(t.id)
+        ? { ...t, mute: false, solo: false }
+        : { ...t, mute: true, solo: false }
+    )
+  }
+}
+
+/** 渲染并导出 WAV（支持区间 / 位深 / 采样率 / 分轨） */
+export async function exportAudioWav(opts: ExportWavOptions = {}): Promise<void> {
   if (state.busy) return
   await ensureAudio()
   state.busy = true
-  state.statusText = '正在离线渲染音频…'
   try {
-    const buffer = await engine.renderToAudioBuffer(state.project)
-    downloadBlob(audioBufferToWavBlob(buffer), `${state.project.name || 'project'}.wav`)
-    state.statusText = 'WAV 导出完成'
+    const beatsPerBar = beatsPerBarOf(state.project.timeSignature)
+    const totalBeats = state.project.bars * beatsPerBar
+    const fromBeat = Math.max(0, (opts.fromBar ?? 0) * beatsPerBar)
+    // 结束小节收敛到工程范围内，且至少保留四分之一小节
+    const toBeat = clamp((opts.toBar ?? state.project.bars) * beatsPerBar, fromBeat + beatsPerBar / 4, totalBeats)
+    const renderOpts = { fromBeat, toBeat, sampleRate: opts.sampleRate }
+    const bitDepth = opts.bitDepth ?? 16
+    const baseName = sanitizeFileName(state.project.name || 'project')
+
+    state.statusText = '正在离线渲染音频…'
+    if (opts.stems) {
+      const targets = state.project.tracks.filter((t) => t.kind !== 'group')
+      if (targets.length === 0) throw new Error('工程里没有可导出的轨道')
+      let index = 0
+      for (const track of targets) {
+        index += 1
+        state.statusText = `正在导出分轨（${index}/${targets.length}）：${track.name}…`
+        const stem = await engine.renderToAudioBuffer(cloneProjectForStem(state.project, track.id), renderOpts)
+        downloadBlob(audioBufferToWavBlob(stem, bitDepth), `${baseName} - ${sanitizeFileName(track.name)}.wav`)
+      }
+      state.statusText = `分轨导出完成（${targets.length} 个文件）`
+    } else {
+      const buffer = await engine.renderToAudioBuffer(state.project, renderOpts)
+      downloadBlob(audioBufferToWavBlob(buffer, bitDepth), `${baseName}.wav`)
+      state.statusText = 'WAV 导出完成'
+    }
   } catch (error) {
-    console.error('[exportWav]', error)
+    console.error('[exportAudioWav]', error)
     state.statusText = `WAV 导出失败：${(error as Error).message}`
   } finally {
     state.busy = false

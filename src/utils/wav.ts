@@ -1,26 +1,30 @@
 /**
- * AudioBuffer -> WAV(16bit PCM) Blob
+ * AudioBuffer -> WAV(16/24bit PCM) Blob
  * 自己实现编码，避免为了导出引入额外依赖。
  */
-export function audioBufferToWavBlob(buffer: AudioBuffer): Blob {
+export function audioBufferToWavBlob(buffer: AudioBuffer, bitDepth: 16 | 24 = 16): Blob {
   // 取出各声道数据（超出 2 声道时只保留前两个），其余交给通用编码函数
   const numChannels = Math.min(2, buffer.numberOfChannels)
   const channels: Float32Array[] = []
   for (let c = 0; c < numChannels; c += 1) {
     channels.push(buffer.getChannelData(c))
   }
-  return pcmChannelsToWavBlob(channels, buffer.sampleRate)
+  return pcmChannelsToWavBlob(channels, buffer.sampleRate, bitDepth)
 }
 
 /**
- * 多声道 PCM（Float32）-> WAV(16bit PCM) Blob
+ * 多声道 PCM（Float32）-> WAV(16/24bit PCM) Blob
  * 供没有 AudioBuffer 的场景直接编码，例如代码实时合成的示例音频。
  */
-export function pcmChannelsToWavBlob(channels: Float32Array[], sampleRate: number): Blob {
+export function pcmChannelsToWavBlob(
+  channels: Float32Array[],
+  sampleRate: number,
+  bitDepth: 16 | 24 = 16
+): Blob {
   const numChannels = Math.min(2, channels.length)
   const numFrames = channels[0]?.length ?? 0
 
-  const bytesPerSample = 2
+  const bytesPerSample = bitDepth / 8
   const blockAlign = numChannels * bytesPerSample
   const dataSize = numFrames * blockAlign
   const headerSize = 44
@@ -56,7 +60,7 @@ export function pcmChannelsToWavBlob(channels: Float32Array[], sampleRate: numbe
   offset += 4
   view.setUint16(offset, blockAlign, true)
   offset += 2
-  view.setUint16(offset, 8 * bytesPerSample, true) // 位深
+  view.setUint16(offset, bitDepth, true) // 位深
   offset += 2
 
   // ---- data 子块 ----
@@ -64,11 +68,19 @@ export function pcmChannelsToWavBlob(channels: Float32Array[], sampleRate: numbe
   view.setUint32(offset, dataSize, true)
   offset += 4
 
-  // 交错写入并转成 16bit
+  // 交错写入：16bit 用 setInt16，24bit 手工拆成 3 个字节（小端）
   for (let frame = 0; frame < numFrames; frame += 1) {
     for (let c = 0; c < numChannels; c += 1) {
       const sample = Math.max(-1, Math.min(1, channels[c][frame]))
-      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
+      if (bitDepth === 16) {
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
+      } else {
+        const value = Math.round(sample < 0 ? sample * 0x800000 : sample * 0x7fffff)
+        // 小端 3 字节：低 8 位、中 8 位、高 8 位（最高位是符号）
+        view.setUint8(offset, value & 0xff)
+        view.setUint8(offset + 1, (value >> 8) & 0xff)
+        view.setUint8(offset + 2, (value >> 16) & 0xff)
+      }
       offset += bytesPerSample
     }
   }

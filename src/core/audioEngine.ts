@@ -5,6 +5,7 @@ import type {
   EqBand,
   InstrumentType,
   Project,
+  TempoPoint,
   TimeSignature,
   Track,
   TrackEffect
@@ -12,7 +13,10 @@ import type {
 import {
   beatsPerBarOf,
   beatsToTicks,
+  bpmAtBeat,
   midiToNoteName,
+  secondsBetweenBeats,
+  tempoBreakpoints,
   timeSignatureParts
 } from '@/utils/music'
 import { dbToGain } from '@/utils/audio'
@@ -155,7 +159,7 @@ class AudioEngine {
   /** 节拍器循环事件 id */
   private metronomeId: number | null = null
   /** 音频片段播放器（每次重排整体重建） */
-  private clipPlayers: { player: Tone.Player; gain: Tone.Gain }[] = []
+  private clipPlayers: { player: Tone.Player; gain: Tone.Gain; pitch?: Tone.PitchShift }[] = []
   /** 采样键 → AudioBuffer 缓存，避免每次重排都重新拷贝整段采样 */
   private bufferCache = new Map<string, AudioBuffer>()
   /** 当前试听中的临时乐器（管理器里点「试听」时创建，播完自动释放） */
@@ -165,6 +169,8 @@ class AudioEngine {
   private countInOn = false
   private bpm = 120
   private timeSignature: TimeSignature = '4/4'
+  /** 当前工程的速度点表（scheduleProject 时随工程更新），供播放/跳转时锚定速度曲线 */
+  private tempoPoints: TempoPoint[] = []
 
   /** 播放触发音符时的回调（用于虚拟键盘高亮） */
   onNoteOn: ((midi: number, trackId: string) => void) | null = null
@@ -226,7 +232,37 @@ class AudioEngine {
     t.bpm.value = this.bpm
     t.timeSignature = timeSignatureParts(this.timeSignature)
 
+    // 循环回绕时重新锚定速度曲线：速度斜坡是按绝对时间排期的一次性事件，
+    // 第二轮循环需要重新从第 0 拍铺一遍，否则回绕后会停留在最后一段的速度上
+    t.on('loopEnd', (time: number) => {
+      if (t.state !== 'started') return
+      this.applyTempoMap(0, Math.max(time, Tone.now()))
+    })
+
     this.graphReady = true
+  }
+
+  // ------------------------------------------------------------ 速度自动化
+
+  /**
+   * 把速度曲线排期到 Transport 的 bpm 参数上：
+   * 在 atTime 处锚定 startBeat 上的瞬时速度，再对每个速度点按
+   * 「梯形模型」算出的真实秒数做 linearRamp（随时间线性）。
+   * Tone 的 TickParam 会对 bpm 斜坡做精确积分，拍位与时长相互自洽。
+   */
+  private applyTempoMap(startBeat: number, atTime?: number): void {
+    if (!this.graphReady) return
+    const param = this.transport.bpm
+    const base = atTime ?? Tone.now()
+    param.cancelScheduledValues(0)
+    param.setValueAtTime(bpmAtBeat(startBeat, this.tempoPoints, this.bpm), base)
+    for (const bp of tempoBreakpoints(this.tempoPoints, this.bpm)) {
+      if (bp.beat <= startBeat) continue
+      param.linearRampToValueAtTime(
+        bp.bpm,
+        base + secondsBetweenBeats(startBeat, bp.beat, this.tempoPoints, this.bpm)
+      )
+    }
   }
 
   // ------------------------------------------------------------ 轨道 / 混音
@@ -568,6 +604,20 @@ class AudioEngine {
     channel.send.gain.value = value
   }
 
+  /**
+   * 自动化写入：绕过「有曲线的参数不写静态值」的规则，
+   * 把当前拖动的值直接写到参数节点上，让播放中的推子立即可闻，
+   * 随后由 store 把写入点合并进曲线并重新排期。
+   */
+  writeParamLive(trackId: string, param: AutomationParam, value: number): void {
+    const channel = this.channels.get(trackId)
+    if (!channel) return
+    const node = this.paramNode(channel, param)
+    const now = Tone.now()
+    node.cancelScheduledValues(now)
+    node.setValueAtTime(value, now)
+  }
+
   private disposeChannel(channel: Channel): void {
     channel.instrument?.dispose()
     disposeEffectChain(channel.effects)
@@ -611,6 +661,7 @@ class AudioEngine {
     if (!this.graphReady) return
     const t = this.transport
     this.trackList = project.tracks
+    this.tempoPoints = project.tempoPoints ?? []
 
     for (const id of this.noteEventIds) t.clear(id)
     this.noteEventIds = []
@@ -654,33 +705,53 @@ class AudioEngine {
     // 循环区间始终覆盖整个工程长度
     t.loopStart = 0
     t.loopEnd = beatsToTicks(project.bars * beatsPerBarOf(project.timeSignature), ppq)
+
+    // 速度点可能被编辑过，按当前位置重新锚定速度曲线（播放中也会平滑重排）
+    this.applyTempoMap(this.getBeats())
   }
 
-  /** 排期一条音频轨上的全部波形片段 */
+  /** 排期一条音频轨上的全部波形片段（含 warp 对齐与半音移调） */
   private scheduleClips(channel: Channel, track: Track, ppq: number): void {
-    const t = this.transport
-    const secondsPerBeat = 60 / t.bpm.value
-
     for (const clip of track.clips) {
       const buffer = this.clipBuffer(clip.key)
       if (!buffer) continue
 
+      // 片段在时间轴上占据的真实秒长与淡入淡出秒数（考虑速度曲线）
+      const slotSeconds = secondsBetweenBeats(
+        clip.start,
+        clip.start + clip.duration,
+        this.tempoPoints,
+        this.bpm
+      )
+      const fadeSeconds = (beats: number): number =>
+        secondsBetweenBeats(clip.start, clip.start + beats, this.tempoPoints, this.bpm)
+
+      // warp：以变速率重采样铺满片段（工程改速度时片段跟随伸缩）；关闭则原速播放
+      const sourceRemaining = Math.max(0.01, clip.sourceDuration - clip.offset)
+      const rate = clip.warp && slotSeconds > 0.01 ? sourceRemaining / slotSeconds : 1
+
       const player = new Tone.Player({
         url: buffer,
-        fadeIn: clip.fadeIn * secondsPerBeat,
-        fadeOut: clip.fadeOut * secondsPerBeat
+        playbackRate: rate,
+        fadeIn: clip.fadeIn > 0 ? fadeSeconds(clip.fadeIn) : 0,
+        fadeOut: clip.fadeOut > 0 ? fadeSeconds(clip.fadeOut) : 0
       })
       const clipGain = new Tone.Gain(clip.gain)
-      player.connect(clipGain)
+      let head: Tone.ToneAudioNode = player
+      let pitch: Tone.PitchShift | undefined
+      // 半音移调：挂在片段增益之前（warp 的速率不会修正音高，两者效果叠加）
+      if (clip.pitchShift !== 0) {
+        pitch = new Tone.PitchShift({ pitch: Math.round(clip.pitchShift) })
+        head.connect(pitch)
+        head = pitch
+      }
+      head.connect(clipGain)
       clipGain.connect(channel.entry)
 
-      // sync() 让播放器跟随 Transport 的播放/暂停/循环，避免中途暂停后仍在出声
-      player.sync().start(
-        beatsToTicks(clip.start, ppq),
-        clip.offset,
-        clip.duration * secondsPerBeat
-      )
-      this.clipPlayers.push({ player, gain: clipGain })
+      // sync() 让播放器跟随 Transport 的播放/暂停/循环，避免中途暂停后仍在出声；
+      // start 的 duration 语义是「源内容秒数」，Tone 内部会除以 playbackRate 换算墙钟时长
+      player.sync().start(beatsToTicks(clip.start, ppq), clip.offset, clip.warp ? sourceRemaining : slotSeconds)
+      this.clipPlayers.push({ player, gain: clipGain, pitch })
     }
   }
 
@@ -688,6 +759,7 @@ class AudioEngine {
     for (const item of this.clipPlayers) {
       item.player.unsync()
       item.player.dispose()
+      item.pitch?.dispose()
       item.gain.dispose()
     }
     this.clipPlayers = []
@@ -718,7 +790,15 @@ class AudioEngine {
 
   setBpm(bpm: number): void {
     this.bpm = bpm
-    this.transport.bpm.value = bpm
+    // 有速度点时直接写 value 会清掉斜坡，统一走 applyTempoMap 按当前位置重新锚定
+    this.applyTempoMap(this.getBeats())
+  }
+
+  /** 更新速度曲线（工程速度点变化后调用，按当前位置重新锚定） */
+  setTempoMap(points: TempoPoint[], baseBpm: number): void {
+    this.tempoPoints = points
+    this.bpm = baseBpm
+    this.applyTempoMap(this.getBeats())
   }
 
   /** 总输出音量（0~1） */
@@ -814,14 +894,21 @@ class AudioEngine {
       for (let i = 0; i < count; i += 1) {
         this.playClick(begin + i * interval, i === 0)
       }
-      t.start(begin + count * interval)
+      // 速度曲线锚定到走带真正启动的那一刻，避免预备拍期间斜坡提前走掉
+      this.applyTempoMap(0, begin)
+      t.start(begin)
     } else {
+      this.applyTempoMap(this.getBeats())
       t.start()
     }
   }
 
   pause(): void {
     this.transport.pause()
+    // 钉住当前速度：取消尚未触发的斜坡，防止暂停期间 bpm 参数继续漂移
+    const param = this.transport.bpm
+    param.cancelScheduledValues(0)
+    param.setValueAtTime(param.value, Tone.now())
   }
 
   stop(): void {
@@ -830,6 +917,8 @@ class AudioEngine {
     t.ticks = 0
     // 回到起点后曲线尚未生效，把参数复位成推子上的静态值，避免停在曲线中途的数值
     this.resetAllAutomation()
+    // 回到第 0 拍，速度曲线重新锚定到基准速度
+    this.applyTempoMap(0)
   }
 
   /** 把全部轨道的自动化参数复位到静态值（停止 / 跳转时调用） */
@@ -853,6 +942,8 @@ class AudioEngine {
   /** 跳转到指定位置（拍） */
   seek(beats: number): void {
     this.transport.ticks = Math.max(0, beats) * this.transport.PPQ
+    // 速度曲线随位置重新锚定，保证后续斜坡与新位置对齐
+    this.applyTempoMap(Math.max(0, beats))
   }
 
   // -------------------------------------------------------- 虚拟键盘实时弹奏
@@ -1062,29 +1153,50 @@ class AudioEngine {
   /**
    * 排期一条轨道的内容（音符 / 音频片段）。
    * 离线渲染的主渲染与侧链预渲染都会复用这里，保证两遍渲染的内容完全一致。
+   * 速度曲线由调用方在 transport 上排期，这里只负责内容与位置。
    */
   private scheduleOfflineContent(
     track: Track,
     channel: OfflineChannel,
     transport: ReturnType<typeof Tone.getTransport>,
-    secondsPerBeat: number
+    tempoPoints: TempoPoint[],
+    baseBpm: number
   ): void {
     if (track.kind === 'audio') {
       for (const clip of track.clips) {
         const pcm = getCachedPcm(clip.key)
         if (!pcm) continue
+        // 片段在时间轴上的真实秒长与淡入淡出（与实时播放同一套换算）
+        const slotSeconds = secondsBetweenBeats(
+          clip.start,
+          clip.start + clip.duration,
+          tempoPoints,
+          baseBpm
+        )
+        const fadeSeconds = (beats: number): number =>
+          secondsBetweenBeats(clip.start, clip.start + beats, tempoPoints, baseBpm)
+        const sourceRemaining = Math.max(0.01, clip.sourceDuration - clip.offset)
+        const rate = clip.warp && slotSeconds > 0.01 ? sourceRemaining / slotSeconds : 1
+
         const player = new Tone.Player({
           url: pcmToAudioBuffer(pcm),
-          fadeIn: clip.fadeIn * secondsPerBeat,
-          fadeOut: clip.fadeOut * secondsPerBeat
+          playbackRate: rate,
+          fadeIn: clip.fadeIn > 0 ? fadeSeconds(clip.fadeIn) : 0,
+          fadeOut: clip.fadeOut > 0 ? fadeSeconds(clip.fadeOut) : 0
         })
         const clipGain = new Tone.Gain(clip.gain)
-        player.connect(clipGain)
+        let head: Tone.ToneAudioNode = player
+        if (clip.pitchShift !== 0) {
+          const pitch = new Tone.PitchShift({ pitch: Math.round(clip.pitchShift) })
+          head.connect(pitch)
+          head = pitch
+        }
+        head.connect(clipGain)
         clipGain.connect(channel.entry)
         player.sync().start(
           beatsToTicks(clip.start, transport.PPQ),
           clip.offset,
-          clip.duration * secondsPerBeat
+          clip.warp ? sourceRemaining : slotSeconds
         )
       }
       return
@@ -1095,7 +1207,8 @@ class AudioEngine {
     for (const region of track.regions) {
       for (const note of region.notes) {
         const at = beatsToTicks(region.start + note.start, transport.PPQ)
-        const seconds = note.duration * secondsPerBeat
+        // 音符时长按起始拍上的瞬时速度估算（速度变化中音符时长取起点速度）
+        const seconds = note.duration * 60 / bpmAtBeat(region.start + note.start, tempoPoints, baseBpm)
         transport.schedule((time) => {
           if (drum) instrument.triggerAttackRelease(note.midi, seconds, time, note.velocity)
           else instrument.triggerAttackRelease(midiToNoteName(note.midi), seconds, time, note.velocity)
@@ -1144,7 +1257,8 @@ class AudioEngine {
    */
   private async renderSidechainEnvelopes(
     project: Project,
-    duration: number
+    duration: number,
+    fromBeat: number
   ): Promise<Map<string, { time: number; gain: number }[]>> {
     const result = new Map<string, { time: number; gain: number }[]>()
     // 源轨道 → 该源上最大的衰减量（多个目标共用同一个源时取最大）
@@ -1158,7 +1272,7 @@ class AudioEngine {
     }
     if (sources.size === 0) return result
 
-    const secondsPerBeat = 60 / project.bpm
+    const tempoPoints = project.tempoPoints ?? []
     this.trackList = project.tracks
 
     for (const [sourceId, amount] of sources) {
@@ -1173,15 +1287,17 @@ class AudioEngine {
         // 侧链源的单轨渲染：混响总线接了但不送回输出，只关心它的干声电平
         const spareReverb = new Tone.Freeverb({ roomSize: 0.72, dampening: 2600, wet: 1 })
         const channel = this.buildOfflineChannel(source, project, sink, spareReverb)
-        this.scheduleOfflineContent(source, channel, transport, secondsPerBeat)
+        this.scheduleOfflineContent(source, channel, transport, tempoPoints, project.bpm)
 
         transport.scheduleRepeat((time: number) => {
           const level = Math.min(1, readMeter(meter) * 2)
           samples.push({ time, gain: dbToGain(-level * amount) })
         }, '16n')
 
-        transport.bpm.value = project.bpm
+        // 与主渲染完全一致的速度曲线与起始位置，保证包络时间戳能对上
+        scheduleTempoOffline(transport, tempoPoints, project.bpm, fromBeat)
         transport.timeSignature = timeSignatureParts(project.timeSignature)
+        transport.ticks = fromBeat * transport.PPQ
         transport.start(0)
       }, duration)
 
@@ -1195,66 +1311,110 @@ class AudioEngine {
    * 注意：Tone.Offline 执行期间全局上下文会临时切换到离线上下文，
    * 回调里拿到的 transport 属于该离线上下文，因此节点与排期都在回调内创建。
    * 这里的信号链与实时播放保持一致（效果器 → 侧链衰减 → 均衡 → 声像 → 推子 → 编组/总线 → 限幅），
-   * 自动化曲线与侧链闪避也会一并渲染进去。
+   * 自动化曲线、速度曲线与侧链闪避也会一并渲染进去。
+   *
+   * @param opts 导出选项：起止区间与采样率（缺省渲染整首、跟随浏览器采样率）
    */
-  async renderToAudioBuffer(project: Project): Promise<AudioBuffer> {
+  async renderToAudioBuffer(project: Project, opts: RenderOptions = {}): Promise<AudioBuffer> {
     const totalBeats = this.projectLengthBeats(project)
-    const secondsPerBeat = 60 / project.bpm
+    const fromBeat = Math.max(0, opts.fromBeat ?? 0)
+    const toBeat = Math.min(totalBeats, Math.max(fromBeat + 0.0625, opts.toBeat ?? totalBeats))
+    const tempoPoints = project.tempoPoints ?? []
     // 额外留 2 秒混响尾巴
-    const duration = totalBeats * secondsPerBeat + 2
-    const sidechainEnvelopes = await this.renderSidechainEnvelopes(project, duration)
+    const duration = secondsBetweenBeats(fromBeat, toBeat, tempoPoints, project.bpm) + 2
+    const sidechainEnvelopes = await this.renderSidechainEnvelopes(project, duration, fromBeat)
     this.trackList = project.tracks
 
-    const rendered = await Tone.Offline(({ transport }) => {
-      const dryBus = new Tone.Gain(1)
-      const reverbBus = new Tone.Freeverb({ roomSize: 0.72, dampening: 2600, wet: 1 })
-      const reverbReturn = new Tone.Gain(project.reverbWet)
-      const master = new Tone.Gain(project.masterVolume)
-      const limiter = new Tone.Limiter(project.masterLimiter)
+    const rendered = await Tone.Offline(
+      ({ transport }) => {
+        const dryBus = new Tone.Gain(1)
+        const reverbBus = new Tone.Freeverb({ roomSize: 0.72, dampening: 2600, wet: 1 })
+        const reverbReturn = new Tone.Gain(project.reverbWet)
+        const master = new Tone.Gain(project.masterVolume)
+        const limiter = new Tone.Limiter(project.masterLimiter)
 
-      dryBus.connect(master)
-      reverbBus.connect(reverbReturn)
-      reverbReturn.connect(master)
-      master.connect(limiter)
-      limiter.toDestination()
+        dryBus.connect(master)
+        reverbBus.connect(reverbReturn)
+        reverbReturn.connect(master)
+        master.connect(limiter)
+        limiter.toDestination()
 
-      const channels = new Map<string, OfflineChannel>()
-      // 按层级建链，保证挂到编组上的子轨能找到父级入口
-      for (const track of this.orderByDepth(project.tracks)) {
-        const parent = track.parentId ? channels.get(track.parentId) : undefined
-        const destination = parent ? parent.entry : dryBus
-        channels.set(track.id, this.buildOfflineChannel(track, project, destination, reverbBus))
-      }
-
-      for (const track of project.tracks) {
-        const channel = channels.get(track.id)
-        if (!channel) continue
-
-        // 自动化曲线：与实时播放共用同一条曲线
-        for (const lane of track.automation ?? []) {
-          this.scheduleLane(transport, this.offlineParamNode(channel, lane.param), lane, transport.PPQ, null)
+        const channels = new Map<string, OfflineChannel>()
+        // 按层级建链，保证挂到编组上的子轨能找到父级入口
+        for (const track of this.orderByDepth(project.tracks)) {
+          const parent = track.parentId ? channels.get(track.parentId) : undefined
+          const destination = parent ? parent.entry : dryBus
+          channels.set(track.id, this.buildOfflineChannel(track, project, destination, reverbBus))
         }
 
-        // 侧链闪避：把预渲染得到的包络写进 duck 增益
-        const envelope = sidechainEnvelopes.get(track.id)
-        if (envelope) {
-          for (const item of envelope) channel.duck.gain.setValueAtTime(item.gain, item.time)
+        for (const track of project.tracks) {
+          const channel = channels.get(track.id)
+          if (!channel) continue
+
+          // 自动化曲线：与实时播放共用同一条曲线
+          for (const lane of track.automation ?? []) {
+            this.scheduleLane(transport, this.offlineParamNode(channel, lane.param), lane, transport.PPQ, null)
+          }
+
+          // 侧链闪避：把预渲染得到的包络写进 duck 增益
+          const envelope = sidechainEnvelopes.get(track.id)
+          if (envelope) {
+            for (const item of envelope) channel.duck.gain.setValueAtTime(item.gain, item.time)
+          }
+
+          // 编组轨自身没有内容，只作为子轨的汇合点
+          if (track.kind === 'group') continue
+          this.scheduleOfflineContent(track, channel, transport, tempoPoints, project.bpm)
         }
 
-        // 编组轨自身没有内容，只作为子轨的汇合点
-        if (track.kind === 'group') continue
-        this.scheduleOfflineContent(track, channel, transport, secondsPerBeat)
-      }
-
-      transport.bpm.value = project.bpm
-      transport.timeSignature = timeSignatureParts(project.timeSignature)
-      transport.start(0)
-    }, duration)
+        // 速度曲线（与实时播放同一模型）：锚定第 0 拍，斜坡落在各速度点的绝对秒上
+        scheduleTempoOffline(transport, tempoPoints, project.bpm, fromBeat)
+        transport.timeSignature = timeSignatureParts(project.timeSignature)
+        // 直接把 Transport 定位到导出起点（tick），避免用秒偏移与速度曲线错位
+        transport.ticks = fromBeat * transport.PPQ
+        transport.start(0)
+      },
+      duration,
+      2,
+      opts.sampleRate
+    )
 
     const audioBuffer = rendered.get()
     if (!audioBuffer) throw new Error('离线渲染失败：未得到音频数据')
     return audioBuffer
   }
+}
+
+/** 离线导出选项 */
+export interface RenderOptions {
+  /** 起始拍（含），缺省 0 */
+  fromBeat?: number
+  /** 结束拍（不含其后的内容），缺省工程末尾 */
+  toBeat?: number
+  /** 目标采样率（Hz），缺省跟随浏览器 */
+  sampleRate?: number
+}
+
+/**
+ * 在离线 Transport 上排期速度曲线：
+ * 第 0 拍锚定基准速度，每个速度点按「梯形模型」的真实秒数做线性斜坡；
+ * fromBeat 之后的曲线已经隐含在绝对秒里，无需再次偏移。
+ */
+function scheduleTempoOffline(
+  transport: ReturnType<typeof Tone.getTransport>,
+  tempoPoints: TempoPoint[],
+  baseBpm: number,
+  fromBeat: number
+): void {
+  transport.bpm.setValueAtTime(bpmAtBeat(0, tempoPoints, baseBpm), 0)
+  for (const bp of tempoBreakpoints(tempoPoints, baseBpm)) {
+    if (bp.beat <= 0) continue
+    transport.bpm.linearRampToValueAtTime(
+      bp.bpm,
+      secondsBetweenBeats(0, bp.beat, tempoPoints, baseBpm)
+    )
+  }
+  void fromBeat
 }
 
 /** 离线渲染用的轨道通道（与实时 Channel 对应的最小集合） */

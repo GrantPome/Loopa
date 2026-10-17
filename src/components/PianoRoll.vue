@@ -7,7 +7,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue'
 import DropdownMenu from './DropdownMenu.vue'
-import type { AutomationPoint, GridDivision, Note } from '@/types'
+import type { AutomationPoint, AutomationWriteMode, GridDivision, Note } from '@/types'
 import {
   AUTOMATION_PARAMS,
   AUTOMATION_PARAM_MAP,
@@ -44,6 +44,7 @@ import {
   removeNotes,
   scaleTargetVelocity,
   setAutomationParam,
+  setAutomationWriteMode,
   selectAllNotes,
   setNoteSelection,
   setScaleRoot,
@@ -1140,6 +1141,11 @@ function onAutomationParamChange(event: Event): void {
   requestDraw()
 }
 
+/** 切换自动化写入模式（off / touch / latch） */
+function onWriteModeChange(event: Event): void {
+  setAutomationWriteMode((event.target as HTMLSelectElement).value as AutomationWriteMode)
+}
+
 /** 参数读数文案：均衡用 dB，其余用百分比 */
 function paramValueText(value: number): string {
   const param = state.automationParam
@@ -2226,6 +2232,17 @@ watch(
               <option v-for="item in AUTOMATION_PARAMS" :key="item.key" :value="item.key">
                 {{ item.label }}
               </option>
+            </select>
+          </label>
+          <label class="field" title="播放中调整混音台推子时是否把动作写进自动化曲线">
+            写入
+            <select
+              :value="state.automationWriteMode"
+              @change="onWriteModeChange"
+            >
+              <option value="off">关</option>
+              <option value="touch">Touch（仅已有曲线）</option>
+              <option value="latch">Latch（可新建）</option>
             </select>
           </label>
           <button title="在播放头位置插入一个自动化点" @click="onAddAutomationPoint">加点</button>
