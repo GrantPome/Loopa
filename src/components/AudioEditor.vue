@@ -122,7 +122,7 @@ function draw(): void {
     }
   } else {
     ctx.fillStyle = 'rgba(255,255,255,0.25)'
-    ctx.font = '12px system-ui, sans-serif'
+    ctx.font = '12px "HarmonyOS Sans SC", system-ui, sans-serif'
     ctx.textAlign = 'center'
     ctx.fillText('该片段暂无波形数据', width / 2, mid)
   }

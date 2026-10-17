@@ -31,6 +31,14 @@ const comingSoonItems = [
 const changelog: { date: string; title: string; items: string[] }[] = [
   {
     date: '2026-10-17',
+    title: '界面字体',
+    items: [
+      '全站字体改为 HarmonyOS Sans SC，字体文件随工程打包，不依赖外部 CDN',
+      '钢琴卷帘、时间轴标尺与波形画布上的文字同步改用该字体'
+    ]
+  },
+  {
+    date: '2026-10-17',
     title: '标点功能易用性改进',
     items: [
       '打点、自动卡点、上 / 下一个标点移到顶部工具栏，成为常驻快捷按钮，并显示当前标点数量',

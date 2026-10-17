@@ -593,10 +593,10 @@ function drawKeys(): void {
     // 音名标注：C 行加粗，其余白键淡显
     const pitchClass = ((midi % 12) + 12) % 12
     if (pitchClass === 0) {
-      ctx.font = 'bold 9px system-ui, sans-serif'
+      ctx.font = 'bold 9px "HarmonyOS Sans SC", system-ui, sans-serif'
       ctx.fillStyle = black ? '#eef1f6' : '#3d4252'
       ctx.fillText(midiToNoteName(midi), 4, y + rowH / 2)
-      ctx.font = '9px system-ui, sans-serif'
+      ctx.font = '9px "HarmonyOS Sans SC", system-ui, sans-serif'
     } else if (!black) {
       ctx.fillStyle = 'rgba(0,0,0,0.34)'
       ctx.fillText(midiToNoteName(midi), 4, y + rowH / 2)

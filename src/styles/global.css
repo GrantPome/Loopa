@@ -1,4 +1,17 @@
 /* 全局基础样式：精致暗色，低饱和、层次分明，参考库乐队的克制配色 */
+
+/*
+ * 品牌字体：HarmonyOS Sans SC
+ * 字体文件随工程一起打包（src/assets/fonts），不依赖外部字体 CDN，
+ * font-display: swap 让文字先用系统字体显示，字体就绪后再替换，避免白屏。
+ */
+@font-face {
+  font-family: 'HarmonyOS Sans SC';
+  src: url('../assets/fonts/HarmonyOS_Sans_SC.ttf') format('truetype');
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   /* 表面层次：由外到内逐级变亮，形成纵深 */
   --bg: #131418;
@@ -27,7 +40,7 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
 
-  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  font-family: 'HarmonyOS Sans SC', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
 }
 
 * {

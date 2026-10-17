@@ -74,7 +74,7 @@ function draw(): void {
 
   const barFrom = Math.max(0, Math.floor(beatL / bpb))
   const barTo = Math.ceil(beatR / bpb)
-  ctx.font = '10px system-ui, sans-serif'
+  ctx.font = '10px "HarmonyOS Sans SC", system-ui, sans-serif'
   ctx.textBaseline = 'middle'
   for (let bar = barFrom; bar <= barTo; bar += 1) {
     const x = Math.floor(bar * bpb * px)
@@ -179,7 +179,7 @@ function draw(): void {
 
     // 标签：与相邻标签不重叠时才绘制，避免卡点密集时糊成一片
     if (mx + 4 >= labelEndX + 4) {
-      ctx.font = '10px system-ui, sans-serif'
+      ctx.font = '10px "HarmonyOS Sans SC", system-ui, sans-serif'
       ctx.fillStyle = selected ? '#ffffff' : 'rgba(255, 255, 255, 0.62)'
       const text = marker.label
       ctx.fillText(text, mx + 6, 5)
