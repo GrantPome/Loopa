@@ -48,6 +48,13 @@ const comingSoonItems = [
 const changelog: { date: string; title: string; items: string[] }[] = [
   {
     date: '2026-10-17',
+    title: '品牌 LOGO 换新',
+    items: [
+      '顶栏品牌图形更换为 Loopa 字标，并按新图形的比例调整了占位尺寸，避免留白'
+    ]
+  },
+  {
+    date: '2026-10-17',
     title: '品牌更名',
     items: [
       '产品名称由 TonePome 更名为 Loopa：主页标题、顶栏品牌、关于页与页面标题同步更新',
