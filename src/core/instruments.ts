@@ -11,6 +11,14 @@ export interface InstrumentNode {
   triggerAttack(note: string | number, time?: number, velocity?: number): void
   triggerRelease(note: string | number, time?: number): void
   triggerAttackRelease(note: string | number, duration: number, time?: number, velocity?: number): void
+  /**
+   * 释放全部正在发声的 voice。
+   * 当 AudioContext 被短暂挂起时，通过 context.setTimeout 排期的 triggerRelease
+   * 可能不会触发，导致 PolySynth 的 voice 永远卡在 _activeVoices 里；
+   * 达到 maxPolyphony 后新音符会被直接丢弃（Tone.js 不做 voice stealing）。
+   * 在停止 / 恢复上下文时调用本方法把卡住的 voice 全部释放掉。
+   */
+  releaseAll(time?: number): void
   dispose(): void
 }
 
@@ -44,6 +52,10 @@ class MelodicInstrument implements InstrumentNode {
 
   triggerAttackRelease(note: string | number, duration: number, time?: number, velocity?: number): void {
     this.synth.triggerAttackRelease(String(note), duration, time, velocity ?? 0.8)
+  }
+
+  releaseAll(time?: number): void {
+    this.synth.releaseAll(time)
   }
 
   dispose(): void {
@@ -334,6 +346,10 @@ class DrumKit implements InstrumentNode {
     // 鼓组无需 release
   }
 
+  releaseAll(): void {
+    // 鼓组用 triggerAttackRelease 单次触发，没有持续发声的 voice，无需释放
+  }
+
   triggerAttackRelease(note: string | number, _duration: number, time?: number, velocity?: number): void {
     const midi = typeof note === 'number' ? note : Tone.Frequency(note).toMidi()
     const vel = velocity ?? 0.85
@@ -496,6 +512,11 @@ class SampledInstrument implements InstrumentNode {
       // 鼓组是单次触发乐器：忽略音符时长，让采样自然响完
       this.playDrum(midi, time ?? Tone.now(), velocity ?? 0.85)
     }
+  }
+
+  releaseAll(time?: number): void {
+    // 旋律采样器可能有持续发声的 voice 需要释放；鼓组采样是一次性播放，无需处理
+    if (this.kind === 'melodic') this.sampler?.releaseAll(time)
   }
 
   /** 鼓组单次触发：新建一次性 buffer source，播放结束即释放 */

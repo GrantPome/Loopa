@@ -772,6 +772,9 @@ function startTickLoop(): void {
 
     // 仅在音频上下文就绪后才采样电平，避免未初始化时读到无意义的 0
     if (state.audioReady) {
+      // 每帧检查上下文是否被挂起（Chrome 电源管理 / 音频设备空闲等，
+      // 即使不切窗口也可能发生），挂起时自动恢复，避免无声
+      engine.tickContextCheck()
       sampleLevels()
       // 侧链闪避需要逐帧跟随源轨道包络，放在电平采样之后（复用同一批数据）
       engine.updateSidechain(deltaMs)
@@ -2924,13 +2927,23 @@ function collectOnsets(
  * 触发实时发声前先确保音频上下文在运行。
  * 上下文被挂起时引擎里的 currentTime 已冻结，直接触发等于无声，
  * 因此先恢复到运行状态再发声；未运行且已就绪时立即发声，不额外引入延迟。
+ *
+ * 恢复后再次验证状态：某些 Chrome 版本上 context.resume() 的 Promise 可能
+ * 在状态真正变为 running 之前就 resolve，这里加一层验证 + 重试。
  */
 function withRunningContext(trigger: () => void): void {
   if (engine.contextRunning) {
     trigger()
     return
   }
-  void ensureAudio().then(trigger)
+  void (async () => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await ensureAudio()
+      if (engine.contextRunning) break
+      await new Promise((r) => setTimeout(r, 30))
+    }
+    trigger()
+  })()
 }
 
 /** 屏幕键盘：按下发声（需要音频上下文已激活），力度取自键盘力度设置 */

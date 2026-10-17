@@ -195,13 +195,26 @@ class AudioEngine {
 
   /** 用户首次点击后调用，激活 WebAudio 上下文并构建主输出链路 */
   async ensureReady(): Promise<void> {
-    // 上下文可能被浏览器自动挂起（尤其播放停止一段时间后），
+    // 上下文可能被浏览器自动挂起（播放停止一段时间后、电源管理、音频设备切换等），
     // 每次调用都检查并恢复，否则会出现「播放完再播放/弹琴键无声」的问题
     if (this.contextReady && Tone.getContext().state === 'running') return
-    // WebAudio 规则：必须在用户手势之后才能 resume
-    await Tone.start()
+    await this.resumeContext()
     this.buildGraph()
     this.contextReady = true
+  }
+
+  /**
+   * 真正恢复 AudioContext 到 running 状态。
+   * 直接调用 Tone.start()（即 context.resume()）在某些 Chrome 版本上可能返回
+   * 但状态尚未真正变成 running，这里加一层验证 + 重试，确保恢复成功后才返回。
+   */
+  private async resumeContext(): Promise<void> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await Tone.start()
+      if (Tone.getContext().state === 'running') return
+      // 状态还没变，等一小会儿再试（Chrome 的 resume 有时是异步的）
+      await new Promise((r) => setTimeout(r, 30))
+    }
   }
 
   get isReady(): boolean {
@@ -216,11 +229,37 @@ class AudioEngine {
   /** 恢复被挂起的音频上下文；已运行或尚未构建链路时什么都不做 */
   async resume(): Promise<void> {
     if (!this.contextReady || this.contextRunning) return
-    await Tone.start()
+    await this.resumeContext()
+    // 上下文恢复后，把因挂起而卡住的 voice 全部释放掉，
+    // 否则 PolySynth 复音池被占满，新音符无声
+    if (this.graphReady) this.releaseAllVoices()
+  }
+
+  /**
+   * 供心跳循环每帧调用：检测上下文是否被挂起，若是则异步恢复。
+   * Chrome 在 Windows 上会因电源管理 / 音频设备空闲等原因自动挂起 AudioContext，
+   * 即使没有切换窗口也会发生。挂起后 currentTime 冻结，所有排期事件无法触发，
+   * 表现为「无声」；恢复时若有大量卡在旧时间点的事件，可能产生爆音。
+   * 这里每帧检查一次，确保上下文始终处于 running 状态。
+   */
+  tickContextCheck(): void {
+    if (!this.contextReady || this.contextRunning) return
+    // 异步恢复，不阻塞 rAF 帧
+    void this.resume()
   }
 
   private buildGraph(): void {
     if (this.graphReady) return
+
+    // 监听上下文状态变化：一旦被浏览器挂起就标记下来，
+    // 心跳循环会在下一帧尝试恢复；恢复后释放卡住的 voice
+    const ctx = Tone.getContext()
+    ctx.on('statechange', (state: string) => {
+      if (state === 'running' && this.graphReady) {
+        // 从挂起恢复后，释放可能因挂起而卡住的 voice
+        this.releaseAllVoices()
+      }
+    })
 
     // 主输出：干声总线 + 混响总线 → 总音量 → 限幅器 → 扬声器
     this.dryBus = new Tone.Gain(1)
@@ -627,7 +666,10 @@ class AudioEngine {
       // 变化极小时不写入，避免无意义的参数事件堆积
       if (Math.abs(next - channel.sidechainEnv) > 0.0005) {
         channel.sidechainEnv = next
-        channel.duck.gain.value = next
+        // 用 rampTo（内部 cancelAndHoldAtTime + linearRamp）替代直接赋值：
+        // 直接 .value = next 每次都会 cancelScheduledValues + setValueAtTime，
+        // 逐帧写入会让事件时间轴无限堆积，且阶跃式跳变产生拉链噪声
+        channel.duck.gain.rampTo(next, 0.02)
       }
     }
   }
@@ -646,14 +688,18 @@ class AudioEngine {
     const channel = this.channels.get(trackId)
     if (!channel) return
     // EqBand 用的是数据字段名，EQ3 用的是 low/mid/high，这里做一次映射
-    channel.eq[EQ3_KEYS[band]].value = value
+    // 用 rampTo 替代直接赋值：拖动时每帧都会触发，直接赋值会产生拉链噪声
+    const node = channel.eq[EQ3_KEYS[band]]
+    if (Math.abs(node.value - value) < 1e-6) return
+    node.rampTo(value, 0.01)
   }
 
   /** 单独设置混响发送量 */
   setTrackReverbSend(trackId: string, value: number): void {
     const channel = this.channels.get(trackId)
     if (!channel) return
-    channel.send.gain.value = value
+    if (Math.abs(channel.send.gain.value - value) < 1e-6) return
+    channel.send.gain.rampTo(value, 0.01)
   }
 
   /**
@@ -681,6 +727,24 @@ class AudioEngine {
     channel.gain.dispose()
     channel.send.dispose()
     channel.meter.dispose()
+  }
+
+  /**
+   * 释放全部轨道上正在发声的 voice。
+   *
+   * 为什么需要这个方法：
+   * Tone.js 的 PolySynth 在达到 maxPolyphony 时不会偷取 voice，而是直接丢弃新音符。
+   * 而 triggerAttackRelease 的 release 是通过 context.setTimeout 排期的，
+   * 如果 AudioContext 被浏览器短暂挂起（Windows 电源管理、音频设备切换等，
+   * 即使不切窗口也可能发生），setTimeout 不会触发，voice 就永远卡在 _activeVoices 里。
+   * 24 个 voice 全部卡住后，后续所有音符被丢弃 → 无声。
+   * 本方法在停止播放 / 恢复上下文时把卡住的 voice 全部释放掉。
+   */
+  releaseAllVoices(time?: number): void {
+    const t = time ?? Tone.getContext().currentTime
+    for (const channel of this.channels.values()) {
+      channel.instrument?.releaseAll(t)
+    }
   }
 
   // ------------------------------------------------------------ 电平表
@@ -868,19 +932,19 @@ class AudioEngine {
   /** 总输出音量（0~1） */
   setMasterVolume(volume: number): void {
     if (!this.graphReady) return
-    this.masterGain.gain.value = volume
+    setParamValue(this.masterGain.gain, volume)
   }
 
   /** 混响返回量（0~1） */
   setReverbWet(wet: number): void {
     if (!this.graphReady) return
-    this.reverbReturn.gain.value = wet
+    setParamValue(this.reverbReturn.gain, wet)
   }
 
   /** 总线限幅阈值（dB） */
   setLimiterThreshold(db: number): void {
     if (!this.graphReady) return
-    this.limiter.threshold.value = db
+    setParamValue(this.limiter.threshold, db)
   }
 
   setTimeSignature(ts: TimeSignature): void {
@@ -951,6 +1015,10 @@ class AudioEngine {
     const t = this.transport
     if (t.state === 'started') return
 
+    // 播放前先释放可能卡住的 voice（上一次播放因上下文挂起导致 release 丢失），
+    // 否则 PolySynth 复音池被占满后新音符会被丢弃
+    this.releaseAllVoices()
+
     const atStart = this.getBeats() < 0.001
     if (this.countInOn && atStart) {
       const { count, interval } = this.countInPlan()
@@ -982,6 +1050,9 @@ class AudioEngine {
     const t = this.transport
     t.stop()
     t.ticks = 0
+    // 停止时释放全部 voice：避免因上下文挂起导致的 triggerRelease 丢失，
+    // 使 PolySynth 的 voice 池被卡住的 voice 占满，后续无声
+    this.releaseAllVoices()
     // 回到起点后曲线尚未生效，把参数复位成推子上的静态值，避免停在曲线中途的数值
     this.resetAllAutomation()
     // 回到第 0 拍，速度曲线重新锚定到基准速度
@@ -1024,7 +1095,9 @@ class AudioEngine {
     }
     const channel = this.channels.get(trackId)
     if (!channel || !channel.instrument) return
-    const now = Tone.getContext().currentTime
+    // 加 5ms 偏移：上下文刚恢复时 currentTime 可能略有滞后，
+    // 排期到过去会导致事件瞬间全部触发产生爆音
+    const now = Tone.getContext().currentTime + 0.005
     if (channel.drum) channel.instrument.triggerAttack(midi, now, velocity)
     else channel.instrument.triggerAttack(midiToNoteName(midi), now, velocity)
   }
@@ -1032,7 +1105,7 @@ class AudioEngine {
   previewRelease(trackId: string, midi: number): void {
     const channel = this.channels.get(trackId)
     if (!channel || !channel.instrument) return
-    const now = Tone.getContext().currentTime
+    const now = Tone.getContext().currentTime + 0.005
     if (channel.drum) channel.instrument.triggerRelease(midi, now)
     else channel.instrument.triggerRelease(midiToNoteName(midi), now)
   }
@@ -1049,7 +1122,7 @@ class AudioEngine {
     }
     const channel = this.channels.get(trackId)
     if (!channel || !channel.instrument) return
-    const now = Tone.getContext().currentTime
+    const now = Tone.getContext().currentTime + 0.005
     if (channel.drum) channel.instrument.triggerAttackRelease(midi, 0.45, now, velocity)
     else channel.instrument.triggerAttackRelease(midiToNoteName(midi), 0.45, now, velocity)
   }
