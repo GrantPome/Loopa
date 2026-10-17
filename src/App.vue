@@ -18,8 +18,10 @@ import {
   addMarker,
   clearNoteSelection,
   deleteSelectedNotes,
+  endRecording,
   ensureAudio,
   nudgeSelectedVelocity,
+  pause,
   redo,
   removeClip,
   state,
@@ -35,6 +37,18 @@ const historyOpen = ref(false)
 /** 主页「历史工程」：打开历史工程对话框 */
 function onOpenHistory(): void {
   historyOpen.value = true
+}
+
+/**
+ * 从编辑器返回主页。
+ * 必须先停止走带：Tone.Transport 与编辑器界面无关，仅切换视图不会停声，
+ * 否则主页上音乐会继续播放，只能再进编辑器手动暂停。
+ * 录音中则先结束录音落盘；普通播放直接暂停并保留播放头位置。
+ */
+async function onOpenHome(): Promise<void> {
+  if (state.recording) await endRecording()
+  else pause()
+  homeOpen.value = true
 }
 
 /** 插入预览（视口坐标，position: fixed 直接使用） */
@@ -145,7 +159,7 @@ onBeforeUnmount(() => {
     />
 
     <template v-else>
-      <TopToolbar @open-history="historyOpen = true" @open-home="homeOpen = true" />
+      <TopToolbar @open-history="historyOpen = true" @open-home="onOpenHome" />
 
       <!-- 布局编辑模式提示条 -->
       <div v-if="layoutUi.editMode" class="edit-banner">
