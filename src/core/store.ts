@@ -2661,6 +2661,33 @@ export function deleteSavedProject(id: string): void {
   state.savedProjects = storage.readMetas()
 }
 
+/** 重命名历史工程；若正好是当前打开的那个工程，同步改掉它的工程名 */
+export function renameSavedProject(id: string, name: string): void {
+  const next = name.trim()
+  if (!next) return
+  storage.renameProject(id, next)
+  if (state.project.id === id && state.project.name !== next) {
+    state.project.name = next
+    persistOnly()
+  }
+  state.savedProjects = storage.readMetas()
+  state.statusText = `已重命名为「${next}」`
+}
+
+/** 导出某个历史工程为 JSON（不影响当前正在编辑的工程） */
+export function exportSavedProjectJson(id: string): void {
+  const project = storage.loadProject(id)
+  if (!project) {
+    state.statusText = '未找到该工程'
+    return
+  }
+  // 与「导出工程 JSON」同格式：存纯数据快照
+  const snapshot = JSON.parse(JSON.stringify(project)) as Project
+  const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' })
+  downloadBlob(blob, `${project.name || 'project'}.json`)
+  state.statusText = `已导出：${project.name}`
+}
+
 /** 导出工程 JSON */
 export function exportProjectJson(): void {
   const snapshot = JSON.parse(JSON.stringify(state.project)) as Project

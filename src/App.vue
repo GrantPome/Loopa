@@ -19,7 +19,6 @@ import {
   clearNoteSelection,
   deleteSelectedNotes,
   ensureAudio,
-  newProject,
   nudgeSelectedVelocity,
   redo,
   removeClip,
@@ -32,12 +31,6 @@ import {
 /** 主页（欢迎页）开关：首次打开站点时先展示主页 */
 const homeOpen = ref(true)
 const historyOpen = ref(false)
-
-/** 主页「新建工程」：新建后直接进入编辑器 */
-function onNewProject(): void {
-  newProject()
-  homeOpen.value = false
-}
 
 /** 主页「历史工程」：打开历史工程对话框 */
 function onOpenHistory(): void {
@@ -148,7 +141,6 @@ onBeforeUnmount(() => {
     <HomePage
       v-if="homeOpen"
       @enter="homeOpen = false"
-      @new="onNewProject"
       @history="onOpenHistory"
     />
 

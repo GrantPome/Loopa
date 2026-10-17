@@ -70,6 +70,19 @@ export function loadProject(id: string): Project | null {
   return readProjects().find((p) => p.id === id) ?? null
 }
 
+/** 重命名某个历史工程：只改工程名与更新时间，不动音符 / 音频数据 */
+export function renameProject(id: string, name: string): void {
+  try {
+    const list = readProjects().map((p) =>
+      p.id === id ? { ...p, name, updatedAt: Date.now() } : p
+    )
+    const payload: StorageShape = { version: 1, projects: list }
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(payload))
+  } catch (error) {
+    console.warn('[persistence] 重命名工程失败', error)
+  }
+}
+
 /** 删除某个历史工程 */
 export function deleteProject(id: string): void {
   try {

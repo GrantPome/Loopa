@@ -6,18 +6,34 @@
  * - 右侧主内容区：
  *   - 主页：顶部大标题「欢迎使用 TonePome」，中间为音乐制作相关的简约线稿图标
  *     （钢琴键 / 音符 / 波形），下方是「编辑、效果和导出」标语
- *   - 打开项目：右侧直接展示最近保存的工程列表，可加载 / 删除，不再使用弹窗
+ *   - 新建项目：右栏列出「新建空白项目」与「导入音频 / 工程 JSON / MIDI」四种入口
+ *   - 打开项目：右侧直接展示最近保存的工程列表，可打开 / 重命名 / 导出 JSON / 删除，不再使用弹窗
  * - 仅负责入口跳转：新建 → 新建工程并进入编辑器；加载工程 → 载入后进入编辑器
  * 复用项目现有主题令牌（--bg / --panel / --accent），深色暗色 UI，PC / 移动端自适应。
  */
 import { ref } from 'vue'
-import { deleteSavedProject, loadProjectById, state } from '@/core/store'
+import {
+  deleteSavedProject,
+  exportSavedProjectJson,
+  importAudioFile,
+  importMidiFile,
+  importProjectJson,
+  loadProjectById,
+  newProject,
+  renameSavedProject,
+  state
+} from '@/core/store'
 
-const emit = defineEmits<{ (e: 'enter'): void; (e: 'new'): void; (e: 'history'): void }>()
+const emit = defineEmits<{ (e: 'enter'): void; (e: 'history'): void }>()
 
-/** 右侧主内容区视图：主页插画 / 最近项目列表 / 关于与更新日志 */
-type HomeView = 'home' | 'projects' | 'about'
+/** 右侧主内容区视图：主页插画 / 新建项目 / 最近项目列表 / 关于与更新日志 */
+type HomeView = 'home' | 'create' | 'projects' | 'about'
 const view = ref<HomeView>('home')
+
+/** 新建项目的三种导入入口（空白项目直接走 emit('new')） */
+const audioInput = ref<HTMLInputElement | null>(null)
+const jsonInput = ref<HTMLInputElement | null>(null)
+const midiInput = ref<HTMLInputElement | null>(null)
 
 /** 左侧列表项：团队项目暂未开放，仅作占位展示 */
 const comingSoonItems = [
@@ -29,6 +45,15 @@ const comingSoonItems = [
  * 更新日志：按发布日期倒序，内容整理自真实提交历史
  */
 const changelog: { date: string; title: string; items: string[] }[] = [
+  {
+    date: '2026-10-17',
+    title: '主页新建与工程管理',
+    items: [
+      '「新建项目」改为在右栏选择入口：新建空白项目，或直接导入音频 / 工程 JSON / MIDI',
+      '「打开项目」列表支持重命名工程与导出该工程为 JSON 文件',
+      '主页显式声明品牌字体，不再只依赖全站样式继承'
+    ]
+  },
   {
     date: '2026-10-17',
     title: '界面字体',
@@ -119,6 +144,47 @@ function onComingSoon(): void {
   state.statusText = '团队项目即将推出'
 }
 
+// ---------------------------------------------------------------- 新建项目
+
+/** 空白工程：新建后直接进入编辑器 */
+function onCreateBlank(): void {
+  newProject()
+  emit('enter')
+}
+
+/** 新建空白工程后导入音频文件（导入会自动创建音频轨与波形片段） */
+async function onCreateFromAudio(): Promise<void> {
+  const file = audioInput.value?.files?.[0]
+  if (!file) return
+  newProject()
+  await importAudioFile(file)
+  emit('enter')
+  if (audioInput.value) audioInput.value.value = ''
+}
+
+/** 新建空白工程后导入 MIDI 文件（会继承文件里的速度与拍号） */
+async function onCreateFromMidi(): Promise<void> {
+  const file = midiInput.value?.files?.[0]
+  if (!file) return
+  newProject()
+  await importMidiFile(file)
+  emit('enter')
+  if (midiInput.value) midiInput.value.value = ''
+}
+
+/** 导入工程 JSON：直接用文件内容替换当前工程，失败则停留在本页不进入编辑器 */
+async function onCreateFromJson(): Promise<void> {
+  const file = jsonInput.value?.files?.[0]
+  if (!file) return
+  // 导入成功时工程对象会被整体替换，用它判断是否进入编辑器（失败只写状态栏提示）
+  const before = state.project
+  await importProjectJson(file)
+  if (jsonInput.value) jsonInput.value.value = ''
+  if (state.project !== before) emit('enter')
+}
+
+// ---------------------------------------------------------------- 最近项目列表
+
 /** 打开项目：右侧切换到最近项目列表 */
 function onOpenProjects(): void {
   view.value = 'projects'
@@ -136,6 +202,18 @@ function onDeleteProject(id: string): void {
   // 删除前二次确认，避免误触
   if (!window.confirm(`确定要删除工程「${name}」吗？此操作无法撤销。`)) return
   deleteSavedProject(id)
+}
+
+/** 重命名历史工程 */
+function onRenameProject(id: string, current: string): void {
+  const next = window.prompt('工程名称', current)
+  if (next === null) return
+  renameSavedProject(id, next)
+}
+
+/** 导出历史工程为 JSON 文件 */
+function onExportProject(id: string): void {
+  exportSavedProjectJson(id)
 }
 
 /** 工程时间格式：YYYY-MM-DD HH:mm */
@@ -169,7 +247,7 @@ function formatTime(timestamp: number): string {
           主页
         </button>
 
-        <button class="menu-btn" @click="emit('new')">
+        <button class="menu-btn" :class="{ active: view === 'create' }" @click="view = 'create'">
           <!-- 新建图标 -->
           <svg class="mi" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M8 3v10M3 8h10" />
@@ -263,6 +341,53 @@ function formatTime(timestamp: number): string {
           <p class="slogan">编曲、混音和导出</p>
         </template>
 
+        <!-- 新建项目：右栏列出「空白项目」与三种导入方式，先选再进编辑器 -->
+        <template v-else-if="view === 'create'">
+          <h1 class="title">新建项目</h1>
+
+          <div class="create-list">
+            <button class="create-card" @click="onCreateBlank">
+              <!-- 空白文档图标 -->
+              <svg class="ci" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M6 3.5h7.5L18 8v12.5H6z" />
+                <path d="M13.5 3.5V8H18" />
+                <path d="M12 11.5v5M9.5 14h5" />
+              </svg>
+              <span class="c-title">新建空白项目</span>
+              <span class="c-desc">从零开始，默认一条钢琴轨，可随后自由加轨</span>
+            </button>
+
+            <button class="create-card" @click="audioInput?.click()">
+              <!-- 波形图标 -->
+              <svg class="ci" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 12h2M8 8v8M12 5v14M16 9v6M20 11v2" />
+              </svg>
+              <span class="c-title">导入音频</span>
+              <span class="c-desc">新建工程并载入 wav / mp3 等音频文件为波形片段</span>
+            </button>
+
+            <button class="create-card" @click="jsonInput?.click()">
+              <!-- 工程 JSON 图标 -->
+              <svg class="ci" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 5c-2 0-2.5 1.5-2.5 3.5S5 11 5 12s1.5 1.5 1.5 3.5S7 19 9 19" />
+                <path d="M15 5c2 0 2.5 1.5 2.5 3.5S19 11 19 12s-1.5 1.5-1.5 3.5S17 19 15 19" />
+              </svg>
+              <span class="c-title">导入工程 JSON</span>
+              <span class="c-desc">用之前导出的 .json 工程文件继续编辑</span>
+            </button>
+
+            <button class="create-card" @click="midiInput?.click()">
+              <!-- MIDI 音符图标 -->
+              <svg class="ci" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="4" y="4" width="16" height="16" rx="2" />
+                <path d="M8.5 4v10M12 4v10M15.5 4v10M4 14h16" />
+              </svg>
+              <span class="c-title">导入 MIDI</span>
+              <span class="c-desc">新建工程并从 .mid 文件载入 MIDI 轨道，沿用它自带的速度与拍号</span>
+            </button>
+          </div>
+        </template>
+
         <!-- 打开项目：最近项目列表 -->
         <template v-else-if="view === 'projects'">
           <h1 class="title">打开项目</h1>
@@ -282,7 +407,30 @@ function formatTime(timestamp: number): string {
                 <div class="project-meta">{{ formatTime(item.updatedAt) }}</div>
               </div>
               <button class="load-btn" @click="onLoadProject(item.id)">打开</button>
-              <button class="delete-btn" title="删除该工程" @click="onDeleteProject(item.id)">
+              <button
+                class="icon-btn"
+                title="重命名该工程"
+                @click="onRenameProject(item.id, item.name)"
+              >
+                <!-- 铅笔图标 -->
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M10.5 2.5l3 3-8 8-3.5.5.5-3.5z" />
+                  <path d="M9.5 3.5l3 3" />
+                </svg>
+              </button>
+              <button
+                class="icon-btn"
+                title="导出该工程为 JSON 文件"
+                @click="onExportProject(item.id)"
+              >
+                <!-- 下载图标 -->
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M8 2.5v8" />
+                  <path d="M4.5 7.5L8 11l3.5-3.5" />
+                  <path d="M3 13h10" />
+                </svg>
+              </button>
+              <button class="icon-btn danger" title="删除该工程" @click="onDeleteProject(item.id)">
                 <!-- 垃圾桶图标 -->
                 <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M2 4h12" />
@@ -334,6 +482,11 @@ function formatTime(timestamp: number): string {
         </template>
       </main>
     </div>
+
+    <!-- 新建项目的隐藏文件选择框：点卡片时由脚本触发 -->
+    <input ref="audioInput" type="file" accept="audio/*" class="hidden-file" @change="onCreateFromAudio" />
+    <input ref="jsonInput" type="file" accept="application/json,.json" class="hidden-file" @change="onCreateFromJson" />
+    <input ref="midiInput" type="file" accept="audio/midi,.mid,.midi" class="hidden-file" @change="onCreateFromMidi" />
   </div>
 </template>
 
@@ -347,6 +500,8 @@ function formatTime(timestamp: number): string {
   justify-content: center;
   padding: 24px;
   background: var(--bg);
+  /* 主页也显式指定品牌字体：不依赖继承，防止宿主样式差异导致回退到系统字体 */
+  font-family: 'HarmonyOS Sans SC', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
 }
 
 /* 欢迎窗口：PR 欢迎页式双栏卡片 */
@@ -518,6 +673,63 @@ function formatTime(timestamp: number): string {
   color: var(--text-dim);
 }
 
+/* ---------------------------------------------------------------- 新建项目 */
+
+.create-list {
+  align-self: stretch;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 56px;
+}
+
+/* 选项卡片：左图标右文案，整块可点 */
+.create-card {
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 12px;
+  row-gap: 3px;
+  align-items: center;
+  padding: 14px 16px;
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.create-card:hover:not(:disabled) {
+  background: var(--panel-3);
+  border-color: var(--accent);
+}
+
+.ci {
+  grid-row: 1 / 3;
+  width: 26px;
+  height: 26px;
+  color: var(--text-dim);
+}
+
+.create-card:hover .ci {
+  color: var(--accent);
+}
+
+.c-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.c-desc {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.hidden-file {
+  display: none;
+}
+
 /* ---------------------------------------------------------------- 最近项目列表 */
 
 .project-list {
@@ -565,8 +777,8 @@ function formatTime(timestamp: number): string {
   color: var(--accent);
 }
 
-/* 删除按钮：图标按钮，正方形居中 */
-.delete-btn {
+/* 列表项里的图标按钮：正方形居中 */
+.icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -576,7 +788,13 @@ function formatTime(timestamp: number): string {
   color: var(--text-dim);
 }
 
-.delete-btn:hover:not(:disabled) {
+.icon-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 危险操作（删除）：悬停转为告警红 */
+.icon-btn.danger:hover:not(:disabled) {
   color: var(--accent-2);
   border-color: var(--accent-2);
 }
@@ -740,6 +958,12 @@ function formatTime(timestamp: number): string {
   }
 
   .project-list {
+    margin-top: 24px;
+  }
+
+  /* 新建项目：窄屏改单列，避免卡片文字换行过挤 */
+  .create-list {
+    grid-template-columns: 1fr;
     margin-top: 24px;
   }
 
