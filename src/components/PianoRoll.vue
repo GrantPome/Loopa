@@ -2020,6 +2020,7 @@ watch(
             <span class="dd-desc">底部力度编辑条</span>
           </button>
           <button
+            v-if="state.featureToggles.automationLane"
             class="dd-item"
             :class="{ on: state.automationLaneOn }"
             title="展开 / 收起底部自动化包络编辑条"
@@ -2043,7 +2044,7 @@ watch(
       </div>
 
       <!-- 音阶：类型、根音、锁定与量化，收进下拉，触发器上直接显示当前音阶 -->
-      <div class="pr-group">
+      <div v-if="state.featureToggles.scaleLock" class="pr-group">
         <DropdownMenu
           ref="scaleMenuEl"
           :label="'音阶 · ' + scaleLabel"
@@ -2222,8 +2223,8 @@ watch(
         </div>
       </template>
 
-      <!-- 下：自动化包络编辑条（可折叠） -->
-      <template v-if="state.automationLaneOn">
+      <!-- 下：自动化包络编辑条（可折叠，受功能开关控制） -->
+      <template v-if="state.automationLaneOn && state.featureToggles.automationLane">
         <div class="pr-velbar">
           <span class="lane-title">包络</span>
           <label class="field">

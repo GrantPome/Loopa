@@ -35,7 +35,7 @@ import {
   undo
 } from '@/core/store'
 import { TIME_SIGNATURE_OPTIONS } from '@/types'
-import type { TimeSignature, ViewMode } from '@/types'
+import type { FeatureKey, TimeSignature, ViewMode } from '@/types'
 import { layoutUi } from '@/core/layout'
 import { useSegThumb } from '@/core/segThumb'
 import { beatsPerBarOf, formatPosition } from '@/utils/music'
@@ -111,11 +111,16 @@ const menus = computed<MenuDef[]>(() => [
     items: [
       { label: '导出工程 JSON', desc: '完整工程数据，可再次导入', action: exportProjectJson },
       { label: '导出 MIDI', desc: '仅 MIDI 轨，导出 .mid 文件', action: exportMidi },
-      {
-        label: '导出 WAV…',
-        desc: '打开导出对话框：范围 / 位深 / 采样率 / 分轨',
-        action: () => emit('open-export')
-      }
+      // WAV 导出受功能开关控制，关闭时整个入口从菜单里去掉
+      ...(state.featureToggles.wavExport
+        ? [
+            {
+              label: '导出 WAV…',
+              desc: '打开导出对话框：范围 / 位深 / 采样率 / 分轨',
+              action: () => emit('open-export')
+            }
+          ]
+        : [])
     ]
   }
 ])
@@ -164,11 +169,17 @@ function renameSelectedMarker(): void {
 
 // ---------------------------------------------------------------- 视图切换（分段 Tab）
 
-const VIEW_TABS: { id: ViewMode; label: string; title: string }[] = [
+/** 中央编辑区的三个视图页签（未受功能开关影响的完整列表） */
+const VIEW_TABS: { id: ViewMode; label: string; title: string; feature?: FeatureKey }[] = [
   { id: 'piano', label: '钢琴卷帘', title: '钢琴卷帘编辑器（MIDI 轨）' },
-  { id: 'audio', label: '波形', title: '波形编辑器（音频轨）' },
-  { id: 'mixer', label: '混音台', title: '混音台：音量、声像、均衡、混响发送' }
+  { id: 'audio', label: '波形', title: '波形编辑器（音频轨）', feature: 'viewAudio' },
+  { id: 'mixer', label: '混音台', title: '混音台：音量、声像、均衡、混响发送', feature: 'viewMixer' }
 ]
+
+/** 实际渲染的页签：被功能开关关掉的视图直接不出现 */
+const visibleViewTabs = computed(() =>
+  VIEW_TABS.filter((tab) => !tab.feature || state.featureToggles[tab.feature])
+)
 
 /**
  * 分段 Tab 的滑动指示块：复用 core/segThumb 里的两段式动画，
@@ -296,8 +307,9 @@ onBeforeUnmount(() => {
       <button class="icon play" :class="{ active: state.isPlaying }" title="播放 / 暂停" @click="togglePlay">
         {{ state.isPlaying ? '❚❚' : '▶' }}
       </button>
-      <button class="icon" :class="{ active: state.loopOn }" title="循环播放" @click="toggleLoop">↻</button>
+      <button v-if="state.featureToggles.loop" class="icon" :class="{ active: state.loopOn }" title="循环播放" @click="toggleLoop">↻</button>
       <button
+        v-if="state.featureToggles.recording"
         class="icon record"
         :class="{ active: state.recording }"
         :title="state.recording ? '停止录音' : '从播放头位置开始录音（麦克风）'"
@@ -431,7 +443,7 @@ onBeforeUnmount(() => {
     <div class="seg-tabs">
       <span ref="thumbEl" class="seg-thumb" />
       <button
-        v-for="tab in VIEW_TABS"
+        v-for="tab in visibleViewTabs"
         :key="tab.id"
         :ref="(el) => setTabRef(el, tab.id)"
         class="seg-tab"

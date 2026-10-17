@@ -193,7 +193,7 @@ onBeforeUnmount(() => {
     </template>
 
     <ProjectDialog :open="historyOpen" @close="historyOpen = false" />
-    <ExportDialog :open="exportOpen" @close="exportOpen = false" />
+    <ExportDialog :open="exportOpen && state.featureToggles.wavExport" @close="exportOpen = false" />
     <Transition name="mask-fade">
       <SettingsDialog v-if="state.settingsOpen" />
     </Transition>

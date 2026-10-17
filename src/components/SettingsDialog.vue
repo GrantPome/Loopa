@@ -39,6 +39,20 @@ const tabs: { key: SettingsTab; label: string }[] = [
 ]
 const activeTab = ref<SettingsTab>('general')
 
+/** 按分组整理功能开关，设置页按组分节展示 */
+const featureGroups = computed(() => {
+  const groups: { name: string; flags: typeof FEATURE_FLAGS }[] = []
+  for (const flag of FEATURE_FLAGS) {
+    let group = groups.find((g) => g.name === flag.group)
+    if (!group) {
+      group = { name: flag.group, flags: [] }
+      groups.push(group)
+    }
+    group.flags.push(flag)
+  }
+  return groups
+})
+
 const deviceOptions: { value: DeviceMode; label: string; desc: string }[] = [
   { value: 'pc', label: 'PC 桌面端', desc: '鼠标 + 键盘，信息密度高，右键菜单' },
   { value: 'pad', label: 'Pad 平板端', desc: '触控优先，控件放大，长按替代右键' }
@@ -175,11 +189,13 @@ function onAddTempoPoint(): void {
           </template>
 
           <template v-else-if="activeTab === 'features'">
-            <section class="group">
-              <h3>功能开关</h3>
-              <p class="desc">勾选启用 / 关闭某个功能；关闭只是从界面隐藏对应入口，不影响工程数据。</p>
+            <section v-for="group in featureGroups" :key="group.name" class="group">
+              <h3>{{ group.name }}</h3>
+              <p v-if="group.name === featureGroups[0].name" class="desc">
+                勾选启用 / 关闭某个功能；关闭只是从界面隐藏对应入口，不影响工程数据。
+              </p>
 
-              <label v-for="flag in FEATURE_FLAGS" :key="flag.key" class="row switch-row">
+              <label v-for="flag in group.flags" :key="flag.key" class="row switch-row">
                 <span class="label">
                   {{ flag.label }}
                   <small class="flag-desc">{{ flag.desc }}</small>
@@ -234,7 +250,7 @@ function onAddTempoPoint(): void {
               <p v-else-if="!midiState.supported" class="hint error">当前浏览器不支持 Web MIDI，请使用 Chrome / Edge。</p>
             </section>
 
-            <section class="group">
+            <section v-if="state.featureToggles.tempoAutomation" class="group">
               <h3>速度自动化</h3>
               <p class="desc">
                 在工程中途改变速度：第 0 拍的速度由顶部工具栏的 BPM 决定，之后可插入任意多个速度点，播放与导出都会按曲线平滑变速。

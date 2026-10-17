@@ -407,7 +407,31 @@ export type AutomationWriteMode = 'off' | 'touch' | 'latch'
  * 可在「设置 → 功能开关」里启停的可选功能。
  * 关闭后对应按钮 / 面板从界面隐藏，但工程数据不受影响。
  */
-export type FeatureKey = 'metronome' | 'countIn' | 'markers' | 'midi'
+export type FeatureKey =
+  /** 顶栏节拍器开关 */
+  | 'metronome'
+  /** 顶栏预备拍开关 */
+  | 'countIn'
+  /** 顶栏循环播放开关 */
+  | 'loop'
+  /** 顶栏麦克风录音按钮 */
+  | 'recording'
+  /** 顶栏标点工具组（打点 / 自动卡点 / 跳转） */
+  | 'markers'
+  /** 设置页的速度自动化编辑器 */
+  | 'tempoAutomation'
+  /** 中央编辑区的「波形」页签 */
+  | 'viewAudio'
+  /** 中央编辑区的「混音台」页签 */
+  | 'viewMixer'
+  /** 钢琴卷帘底部的自动化包络条 */
+  | 'automationLane'
+  /** 钢琴卷帘的音阶下拉与锁定 */
+  | 'scaleLock'
+  /** MIDI 硬件输入（录制待命 + 设备管理） */
+  | 'midi'
+  /** 导出菜单中的 WAV 导出 */
+  | 'wavExport'
 
 // ---------------------------------------------------------------- 音阶锁定
 

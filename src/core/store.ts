@@ -540,6 +540,22 @@ interface UiPrefs {
   featureToggles: Record<FeatureKey, boolean>
 }
 
+/** 功能开关默认值：新增功能时只需在这里补一行，旧存档会自动取到 true */
+const DEFAULT_FEATURE_TOGGLES: Record<FeatureKey, boolean> = {
+  metronome: true,
+  countIn: true,
+  loop: true,
+  recording: true,
+  markers: true,
+  tempoAutomation: true,
+  viewAudio: true,
+  viewMixer: true,
+  automationLane: true,
+  scaleLock: true,
+  midi: true,
+  wavExport: true
+}
+
 /** 默认界面偏好：与 AppState 的初始值保持一致 */
 function defaultUiPrefs(): UiPrefs {
   return {
@@ -549,7 +565,7 @@ function defaultUiPrefs(): UiPrefs {
     volumeDisplay: 'db',
     velocityLaneOn: true,
     noteColorByVelocity: false,
-    featureToggles: { metronome: true, countIn: true, markers: true, midi: true }
+    featureToggles: { ...DEFAULT_FEATURE_TOGGLES }
   }
 }
 
@@ -2455,19 +2471,52 @@ export function toggleVolumeDisplay(): void {
   writeUiPrefs()
 }
 
-/** 功能开关清单：键 / 名称 / 说明，设置页据此渲染勾选项 */
-export const FEATURE_FLAGS: { key: FeatureKey; label: string; desc: string }[] = [
-  { key: 'metronome', label: '节拍器', desc: '顶栏节拍器开关按钮' },
-  { key: 'countIn', label: '预备拍', desc: '播放前一小节预备拍按钮' },
-  { key: 'markers', label: '标点工具', desc: '顶栏打点 / 跳转 / 自动卡点按钮组' },
-  { key: 'midi', label: 'MIDI 输入', desc: '顶栏「♪」录制待命按钮与设置页 MIDI 设备区' }
+/** 功能开关清单：分组 / 键 / 名称 / 说明，设置页据此渲染勾选项 */
+export const FEATURE_FLAGS: {
+  key: FeatureKey
+  group: string
+  label: string
+  desc: string
+}[] = [
+  { key: 'metronome', group: '播放控制', label: '节拍器', desc: '顶栏节拍器开关按钮' },
+  { key: 'countIn', group: '播放控制', label: '预备拍', desc: '播放前一小节预备拍按钮' },
+  { key: 'loop', group: '播放控制', label: '循环播放', desc: '顶栏循环开关按钮' },
+  { key: 'recording', group: '播放控制', label: '麦克风录音', desc: '顶栏 ● 录音按钮' },
+  { key: 'markers', group: '时间轴', label: '标点工具', desc: '顶栏打点 / 自动卡点 / 跳转按钮组' },
+  { key: 'tempoAutomation', group: '时间轴', label: '速度自动化', desc: '设置页的速度点编辑器' },
+  { key: 'viewAudio', group: '编辑器', label: '波形编辑器', desc: '中央编辑区的「波形」页签' },
+  { key: 'viewMixer', group: '编辑器', label: '混音台', desc: '中央编辑区的「混音台」页签' },
+  { key: 'automationLane', group: '编辑器', label: '自动化包络条', desc: '钢琴卷帘底部的包络与写入模式' },
+  { key: 'scaleLock', group: '编辑器', label: '音阶锁定', desc: '钢琴卷帘的音阶下拉与锁定开关' },
+  { key: 'midi', group: '输入输出', label: 'MIDI 输入', desc: '顶栏「♪」录制待命与设置页 MIDI 设备区' },
+  { key: 'wavExport', group: '输入输出', label: 'WAV 导出', desc: '导出菜单中的「导出 WAV…」与导出对话框' }
 ]
 
 /** 切换某个界面功能的启用状态（仅影响界面，不进入工程历史） */
 export function toggleFeature(key: FeatureKey): void {
-  state.featureToggles[key] = !state.featureToggles[key]
-  // 关闭 MIDI 输入时同步取消录制待命，避免隐藏的按钮仍保持录制状态
-  if (key === 'midi' && !state.featureToggles.midi) state.midiRecordArmed = false
+  const next = !state.featureToggles[key]
+  state.featureToggles[key] = next
+  if (!next) {
+    // 关闭功能时同步复位它控制的界面状态，避免留下「看不见却开着」的开关
+    if (key === 'metronome' && state.metronomeOn) {
+      state.metronomeOn = false
+      engine.setMetronome(false, state.countInOn)
+    }
+    if (key === 'countIn' && state.countInOn) {
+      state.countInOn = false
+      engine.setMetronome(state.metronomeOn, false)
+    }
+    if (key === 'loop' && state.loopOn) {
+      state.loopOn = false
+      engine.setLoop(false)
+    }
+    if (key === 'midi') state.midiRecordArmed = false
+    if (key === 'automationLane' && state.automationLaneOn) state.automationLaneOn = false
+    if (key === 'scaleLock' && state.scaleLockOn) state.scaleLockOn = false
+    // 关闭视图页签时，若当前正停在被关掉的视图上，回退到钢琴卷帘
+    if (key === 'viewAudio' && state.viewMode === 'audio') state.viewMode = 'piano'
+    if (key === 'viewMixer' && state.viewMode === 'mixer') state.viewMode = 'piano'
+  }
   writeUiPrefs()
 }
 
