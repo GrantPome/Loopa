@@ -401,6 +401,14 @@ export interface AutomationLane {
  */
 export type AutomationWriteMode = 'off' | 'touch' | 'latch'
 
+// ---------------------------------------------------------------- 界面功能开关
+
+/**
+ * 可在「设置 → 功能开关」里启停的可选功能。
+ * 关闭后对应按钮 / 面板从界面隐藏，但工程数据不受影响。
+ */
+export type FeatureKey = 'metronome' | 'countIn' | 'markers' | 'midi'
+
 // ---------------------------------------------------------------- 音阶锁定
 
 /** 音阶类型（根音之外的音程结构，单位：半音） */

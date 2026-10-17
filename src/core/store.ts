@@ -9,6 +9,7 @@ import type {
   CustomSample,
   EffectType,
   EqBand,
+  FeatureKey,
   GridDivision,
   InstrumentManagerTab,
   InstrumentType,
@@ -159,6 +160,8 @@ export interface AppState {
   longPressDuration: number
   /** Pad 端是否在底部常驻显示虚拟键盘（PC 端默认折叠） */
   touchKeyboardAlwaysOn: boolean
+  /** 功能开关：用户可勾选启停某些可选功能，默认全开 */
+  featureToggles: Record<FeatureKey, boolean>
   /** 各轨道实时电平 0~1（键为轨道 id） */
   levels: Record<string, number>
   /** 总线输出电平 0~1 */
@@ -534,6 +537,7 @@ interface UiPrefs {
   volumeDisplay: VolumeDisplay
   velocityLaneOn: boolean
   noteColorByVelocity: boolean
+  featureToggles: Record<FeatureKey, boolean>
 }
 
 /** 默认界面偏好：与 AppState 的初始值保持一致 */
@@ -544,7 +548,8 @@ function defaultUiPrefs(): UiPrefs {
     touchKeyboardAlwaysOn: true,
     volumeDisplay: 'db',
     velocityLaneOn: true,
-    noteColorByVelocity: false
+    noteColorByVelocity: false,
+    featureToggles: { metronome: true, countIn: true, markers: true, midi: true }
   }
 }
 
@@ -561,7 +566,8 @@ function readUiPrefs(): UiPrefs {
       touchKeyboardAlwaysOn: parsed.touchKeyboardAlwaysOn !== false,
       volumeDisplay: parsed.volumeDisplay === 'linear' ? 'linear' : 'db',
       velocityLaneOn: parsed.velocityLaneOn !== false,
-      noteColorByVelocity: parsed.noteColorByVelocity === true
+      noteColorByVelocity: parsed.noteColorByVelocity === true,
+      featureToggles: { ...base.featureToggles, ...(parsed.featureToggles ?? {}) }
     }
   } catch {
     return base
@@ -579,7 +585,8 @@ function writeUiPrefs(): void {
         touchKeyboardAlwaysOn: state.touchKeyboardAlwaysOn,
         volumeDisplay: state.volumeDisplay,
         velocityLaneOn: state.velocityLaneOn,
-        noteColorByVelocity: state.noteColorByVelocity
+        noteColorByVelocity: state.noteColorByVelocity,
+        featureToggles: state.featureToggles
       } as UiPrefs)
     )
   } catch {
@@ -625,6 +632,7 @@ export const state = reactive<AppState>({
   instrumentTab: 'builtin',
   longPressDuration: initialUiPrefs.longPressDuration,
   touchKeyboardAlwaysOn: initialUiPrefs.touchKeyboardAlwaysOn,
+  featureToggles: { ...initialUiPrefs.featureToggles },
   levels: {},
   masterLevel: 0,
   limiting: false,
@@ -2444,6 +2452,22 @@ export function setKeyboardVelocity(velocity: number): void {
 /** 切换音量读数单位：dB ↔ 线性百分比（全局生效，仅影响显示） */
 export function toggleVolumeDisplay(): void {
   state.volumeDisplay = state.volumeDisplay === 'db' ? 'linear' : 'db'
+  writeUiPrefs()
+}
+
+/** 功能开关清单：键 / 名称 / 说明，设置页据此渲染勾选项 */
+export const FEATURE_FLAGS: { key: FeatureKey; label: string; desc: string }[] = [
+  { key: 'metronome', label: '节拍器', desc: '顶栏节拍器开关按钮' },
+  { key: 'countIn', label: '预备拍', desc: '播放前一小节预备拍按钮' },
+  { key: 'markers', label: '标点工具', desc: '顶栏打点 / 跳转 / 自动卡点按钮组' },
+  { key: 'midi', label: 'MIDI 输入', desc: '顶栏「♪」录制待命按钮与设置页 MIDI 设备区' }
+]
+
+/** 切换某个界面功能的启用状态（仅影响界面，不进入工程历史） */
+export function toggleFeature(key: FeatureKey): void {
+  state.featureToggles[key] = !state.featureToggles[key]
+  // 关闭 MIDI 输入时同步取消录制待命，避免隐藏的按钮仍保持录制状态
+  if (key === 'midi' && !state.featureToggles.midi) state.midiRecordArmed = false
   writeUiPrefs()
 }
 

@@ -306,6 +306,7 @@ onBeforeUnmount(() => {
         ●
       </button>
       <button
+        v-if="state.featureToggles.midi"
         class="icon"
         :class="{ active: state.midiRecordArmed }"
         :title="state.midiRecordArmed ? '关闭 MIDI 录制待命' : 'MIDI 录制待命：弹奏硬件键盘写入当前轨道'"
@@ -365,10 +366,10 @@ onBeforeUnmount(() => {
           </option>
         </select>
       </label>
-      <button :class="{ active: state.metronomeOn }" title="节拍器开关" @click="toggleMetronome">
+      <button v-if="state.featureToggles.metronome" :class="{ active: state.metronomeOn }" title="节拍器开关" @click="toggleMetronome">
         节拍器
       </button>
-      <button :class="{ active: state.countInOn }" title="播放前一小节预备拍" @click="toggleCountIn">
+      <button v-if="state.featureToggles.countIn" :class="{ active: state.countInOn }" title="播放前一小节预备拍" @click="toggleCountIn">
         预备拍
       </button>
     </div>
@@ -376,7 +377,7 @@ onBeforeUnmount(() => {
     <div class="divider" />
 
     <!-- 标点（标记点）：常用的打点与跳转直接放在工具栏上，随手可用 -->
-    <div class="group markers">
+    <div v-if="state.featureToggles.markers" class="group markers">
       <button
         class="icon flag"
         title="在当前播放头位置打标点（快捷键 M）"

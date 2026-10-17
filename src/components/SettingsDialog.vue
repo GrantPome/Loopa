@@ -12,11 +12,13 @@ import type { DeviceMode } from '@/types'
 import {
   addTempoPoint,
   closeSettings,
+  FEATURE_FLAGS,
   openInstrumentManager,
   removeTempoPoint,
   setDeviceMode,
   setLongPressDuration,
   state,
+  toggleFeature,
   toggleNoteColor,
   toggleTouchKeyboardAlwaysOn,
   toggleVelocityLane,
@@ -26,6 +28,16 @@ import { midiState, disableMidi, enableMidi, selectMidiDevice } from '@/core/mid
 import { resetLayout, setEditMode } from '@/core/layout'
 
 const emit = defineEmits<{ (e: 'close'): void }>()
+
+/** 左侧分类：通用 / 功能开关 / 音频与 MIDI / 界面 */
+type SettingsTab = 'general' | 'features' | 'audio' | 'ui'
+const tabs: { key: SettingsTab; label: string }[] = [
+  { key: 'general', label: '通用' },
+  { key: 'features', label: '功能开关' },
+  { key: 'audio', label: '音频与 MIDI' },
+  { key: 'ui', label: '界面' }
+]
+const activeTab = ref<SettingsTab>('general')
 
 const deviceOptions: { value: DeviceMode; label: string; desc: string }[] = [
   { value: 'pc', label: 'PC 桌面端', desc: '鼠标 + 键盘，信息密度高，右键菜单' },
@@ -104,160 +116,198 @@ function onAddTempoPoint(): void {
       </header>
 
       <div class="body">
-        <section class="group">
-          <h3>设备模式</h3>
-          <p class="desc">选择当前设备的 UI 适配方案，可手动切换。</p>
-          <select class="device-select" :value="state.deviceMode" @change="onDeviceChange">
-            <option v-for="opt in deviceOptions" :key="opt.value" :value="opt.value">
-              {{ opt.label }}
-            </option>
-          </select>
-          <p class="hint">
-            {{ deviceDesc }}
-          </p>
-        </section>
+        <!-- 左侧分类导航 -->
+        <nav class="nav">
+          <button
+            v-for="tab in tabs"
+            :key="tab.key"
+            :class="{ active: activeTab === tab.key }"
+            @click="activeTab = tab.key"
+          >
+            {{ tab.label }}
+          </button>
+        </nav>
 
-        <section class="group">
-          <h3>Pad 触控设置</h3>
-          <p class="desc">仅在 Pad 模式下生效，用于调整触控交互手感。</p>
-
-          <label class="row">
-            <span class="label">长按时长</span>
-            <input
-              type="range"
-              min="200"
-              max="1000"
-              step="50"
-              :value="state.longPressDuration"
-              :disabled="!isPad"
-              @input="onLongPressInput"
-            />
-            <span class="value">{{ state.longPressDuration }} ms</span>
-          </label>
-
-          <label class="row switch-row">
-            <span class="label">虚拟键盘常驻</span>
-            <button
-              class="toggle"
-              :class="{ on: state.touchKeyboardAlwaysOn }"
-              :disabled="!isPad"
-              @click="toggleTouchKeyboardAlwaysOn"
-            >
-              {{ state.touchKeyboardAlwaysOn ? '开' : '关' }}
-            </button>
-          </label>
-        </section>
-
-        <section class="group">
-          <h3>乐器与音源</h3>
-          <p class="desc">
-            在统一的管理器里浏览并试听全部内置音色，或导入自己的采样拼装成一套独立音源。内置音色的采样并不齐全（例如鼓组只有踩镲、缺少吊镲），可用自定义音源补齐。
-          </p>
-          <div class="row layout-row">
-            <button class="primary" @click="onOpenInstruments">打开乐器与音源管理器</button>
-          </div>
-        </section>
-
-        <section class="group">
-          <h3>界面偏好</h3>
-
-          <label class="row switch-row">
-            <span class="label">音量读数单位</span>
-            <button class="toggle" @click="toggleVolumeDisplay">
-              {{ state.volumeDisplay === 'db' ? 'dB' : '线性 %' }}
-            </button>
-          </label>
-
-          <label class="row switch-row">
-            <span class="label">底部力度条</span>
-            <button
-              class="toggle"
-              :class="{ on: state.velocityLaneOn }"
-              @click="toggleVelocityLane"
-            >
-              {{ state.velocityLaneOn ? '展开' : '收起' }}
-            </button>
-          </label>
-
-          <label class="row switch-row">
-            <span class="label">按力度着色</span>
-            <button
-              class="toggle"
-              :class="{ on: state.noteColorByVelocity }"
-              @click="toggleNoteColor"
-            >
-              {{ state.noteColorByVelocity ? '开' : '关' }}
-            </button>
-          </label>
-        </section>
-
-        <section class="group">
-          <h3>MIDI 输入</h3>
-          <p class="desc">
-            连接硬件 MIDI 键盘：弹奏即可试听当前轨道音色；点顶栏「♪」进入录制待命后，弹奏的音符会写进当前轨道。
-          </p>
-          <div class="row layout-row">
-            <button :class="{ primary: !midiState.enabled }" @click="onToggleMidi">
-              {{ midiState.enabled ? '断开 MIDI' : '启用 MIDI 输入' }}
-            </button>
-          </div>
-          <p v-if="midiState.error" class="hint error">{{ midiState.error }}</p>
-          <template v-if="midiState.enabled">
-            <label class="row">
-              <span class="label">输入设备</span>
-              <select class="device-select" :value="midiState.selectedId" @change="onMidiDeviceChange">
-                <option value="">全部输入设备</option>
-                <option v-for="device in midiState.devices" :key="device.id" :value="device.id">
-                  {{ device.name }}
+        <!-- 右侧内容区：只渲染当前分类 -->
+        <div class="content">
+          <template v-if="activeTab === 'general'">
+            <section class="group">
+              <h3>设备模式</h3>
+              <p class="desc">选择当前设备的 UI 适配方案，可手动切换。</p>
+              <select class="device-select" :value="state.deviceMode" @change="onDeviceChange">
+                <option v-for="opt in deviceOptions" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
                 </option>
               </select>
-            </label>
-            <p class="hint">
-              {{ midiState.devices.length > 0 ? `检测到 ${midiState.devices.length} 个输入设备` : '未检测到输入设备，请连接后重试' }}
-            </p>
+              <p class="hint">{{ deviceDesc }}</p>
+            </section>
+
+            <section class="group">
+              <h3>Pad 触控设置</h3>
+              <p class="desc">仅在 Pad 模式下生效，用于调整触控交互手感。</p>
+
+              <label class="row">
+                <span class="label">长按时长</span>
+                <input
+                  type="range"
+                  min="200"
+                  max="1000"
+                  step="50"
+                  :value="state.longPressDuration"
+                  :disabled="!isPad"
+                  @input="onLongPressInput"
+                />
+                <span class="value">{{ state.longPressDuration }} ms</span>
+              </label>
+
+              <label class="row switch-row">
+                <span class="label">虚拟键盘常驻</span>
+                <button
+                  class="toggle"
+                  :class="{ on: state.touchKeyboardAlwaysOn }"
+                  :disabled="!isPad"
+                  @click="toggleTouchKeyboardAlwaysOn"
+                >
+                  {{ state.touchKeyboardAlwaysOn ? '开' : '关' }}
+                </button>
+              </label>
+            </section>
           </template>
-          <p v-else-if="!midiState.supported" class="hint error">当前浏览器不支持 Web MIDI，请使用 Chrome / Edge。</p>
-        </section>
 
-        <section class="group">
-          <h3>速度自动化</h3>
-          <p class="desc">
-            在工程中途改变速度：第 0 拍的速度由顶部工具栏的 BPM 决定，之后可插入任意多个速度点，播放与导出都会按曲线平滑变速。
-          </p>
-          <div class="row layout-row">
-            <input
-              class="tempo-bpm"
-              type="number"
-              min="40"
-              max="200"
-              v-model.number="tempoBpmInput"
-              title="新速度点的 BPM"
-            />
-            <button class="primary" @click="onAddTempoPoint">在播放头添加速度点</button>
-          </div>
-          <div v-if="state.project.tempoPoints.length" class="tempo-list">
-            <div v-for="point in state.project.tempoPoints" :key="point.id" class="tempo-item">
-              <span>第 {{ Math.round(point.beat * 100) / 100 }} 拍</span>
-              <span class="dim">{{ point.bpm }} BPM</span>
-              <button class="danger" title="删除该速度点" @click="removeTempoPoint(point.id)">删除</button>
-            </div>
-          </div>
-          <p v-else class="hint">还没有速度点，整首工程使用固定速度。</p>
-        </section>
+          <template v-else-if="activeTab === 'features'">
+            <section class="group">
+              <h3>功能开关</h3>
+              <p class="desc">勾选启用 / 关闭某个功能；关闭只是从界面隐藏对应入口，不影响工程数据。</p>
 
-        <section class="group">
-          <h3>界面布局</h3>
-          <p class="desc">
-            进入编辑模式后，拖动板块顶部的标题栏，放到目标板块的上 / 下 / 左 / 右边缘，即可把它插入到该位置（也可让板块并排或上下堆叠）；拖动板块之间的分隔条，可调整相邻板块的宽高。
-          </p>
-          <div class="row layout-row">
-            <button class="primary" @click="onEnterEditMode">进入编辑模式</button>
-            <button @click="onResetLayout">恢复默认布局</button>
-          </div>
-          <p class="hint">
-            所有板块（含音符检查器）都能自由组合与嵌套，布局会自动保存。
-          </p>
-        </section>
+              <label v-for="flag in FEATURE_FLAGS" :key="flag.key" class="row switch-row">
+                <span class="label">
+                  {{ flag.label }}
+                  <small class="flag-desc">{{ flag.desc }}</small>
+                </span>
+                <button
+                  class="toggle"
+                  :class="{ on: state.featureToggles[flag.key] }"
+                  @click="toggleFeature(flag.key)"
+                >
+                  {{ state.featureToggles[flag.key] ? '开' : '关' }}
+                </button>
+              </label>
+            </section>
+          </template>
+
+          <template v-else-if="activeTab === 'audio'">
+            <section class="group">
+              <h3>乐器与音源</h3>
+              <p class="desc">
+                在统一的管理器里浏览并试听全部内置音色，或导入自己的采样拼装成一套独立音源。内置音色的采样并不齐全（例如鼓组只有踩镲、缺少吊镲），可用自定义音源补齐。
+              </p>
+              <div class="row layout-row">
+                <button class="primary" @click="onOpenInstruments">打开乐器与音源管理器</button>
+              </div>
+            </section>
+
+            <section v-if="state.featureToggles.midi" class="group">
+              <h3>MIDI 输入</h3>
+              <p class="desc">
+                连接硬件 MIDI 键盘：弹奏即可试听当前轨道音色；点顶栏「♪」进入录制待命后，弹奏的音符会写进当前轨道。
+              </p>
+              <div class="row layout-row">
+                <button :class="{ primary: !midiState.enabled }" @click="onToggleMidi">
+                  {{ midiState.enabled ? '断开 MIDI' : '启用 MIDI 输入' }}
+                </button>
+              </div>
+              <p v-if="midiState.error" class="hint error">{{ midiState.error }}</p>
+              <template v-if="midiState.enabled">
+                <label class="row">
+                  <span class="label">输入设备</span>
+                  <select class="device-select" :value="midiState.selectedId" @change="onMidiDeviceChange">
+                    <option value="">全部输入设备</option>
+                    <option v-for="device in midiState.devices" :key="device.id" :value="device.id">
+                      {{ device.name }}
+                    </option>
+                  </select>
+                </label>
+                <p class="hint">
+                  {{ midiState.devices.length > 0 ? `检测到 ${midiState.devices.length} 个输入设备` : '未检测到输入设备，请连接后重试' }}
+                </p>
+              </template>
+              <p v-else-if="!midiState.supported" class="hint error">当前浏览器不支持 Web MIDI，请使用 Chrome / Edge。</p>
+            </section>
+
+            <section class="group">
+              <h3>速度自动化</h3>
+              <p class="desc">
+                在工程中途改变速度：第 0 拍的速度由顶部工具栏的 BPM 决定，之后可插入任意多个速度点，播放与导出都会按曲线平滑变速。
+              </p>
+              <div class="row layout-row">
+                <input
+                  class="tempo-bpm"
+                  type="number"
+                  min="40"
+                  max="200"
+                  v-model.number="tempoBpmInput"
+                  title="新速度点的 BPM"
+                />
+                <button class="primary" @click="onAddTempoPoint">在播放头添加速度点</button>
+              </div>
+              <div v-if="state.project.tempoPoints.length" class="tempo-list">
+                <div v-for="point in state.project.tempoPoints" :key="point.id" class="tempo-item">
+                  <span>第 {{ Math.round(point.beat * 100) / 100 }} 拍</span>
+                  <span class="dim">{{ point.bpm }} BPM</span>
+                  <button class="danger" title="删除该速度点" @click="removeTempoPoint(point.id)">删除</button>
+                </div>
+              </div>
+              <p v-else class="hint">还没有速度点，整首工程使用固定速度。</p>
+            </section>
+          </template>
+
+          <template v-else>
+            <section class="group">
+              <h3>界面偏好</h3>
+
+              <label class="row switch-row">
+                <span class="label">音量读数单位</span>
+                <button class="toggle" @click="toggleVolumeDisplay">
+                  {{ state.volumeDisplay === 'db' ? 'dB' : '线性 %' }}
+                </button>
+              </label>
+
+              <label class="row switch-row">
+                <span class="label">底部力度条</span>
+                <button
+                  class="toggle"
+                  :class="{ on: state.velocityLaneOn }"
+                  @click="toggleVelocityLane"
+                >
+                  {{ state.velocityLaneOn ? '展开' : '收起' }}
+                </button>
+              </label>
+
+              <label class="row switch-row">
+                <span class="label">按力度着色</span>
+                <button
+                  class="toggle"
+                  :class="{ on: state.noteColorByVelocity }"
+                  @click="toggleNoteColor"
+                >
+                  {{ state.noteColorByVelocity ? '开' : '关' }}
+                </button>
+              </label>
+            </section>
+
+            <section class="group">
+              <h3>界面布局</h3>
+              <p class="desc">
+                进入编辑模式后，拖动板块顶部的标题栏，放到目标板块的上 / 下 / 左 / 右边缘，即可把它插入到该位置（也可让板块并排或上下堆叠）；拖动板块之间的分隔条，可调整相邻板块的宽高。
+              </p>
+              <div class="row layout-row">
+                <button class="primary" @click="onEnterEditMode">进入编辑模式</button>
+                <button @click="onResetLayout">恢复默认布局</button>
+              </div>
+              <p class="hint">所有板块（含音符检查器）都能自由组合与嵌套，布局会自动保存。</p>
+            </section>
+          </template>
+        </div>
       </div>
 
       <footer class="foot">
@@ -281,7 +331,7 @@ function onAddTempoPoint(): void {
 }
 
 .dialog {
-  width: 440px;
+  width: 620px;
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 48px);
   background: var(--panel);
@@ -311,7 +361,44 @@ function onAddTempoPoint(): void {
   font-size: 13px;
 }
 
+/* 左右分栏 */
 .body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: row;
+}
+
+/* 左侧导航 */
+.nav {
+  width: 128px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  border-right: 1px solid var(--line);
+}
+
+.nav button {
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.nav button.active {
+  background: rgba(79, 157, 247, 0.15);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 右侧内容区 */
+.content {
   flex: 1;
   overflow-y: auto;
   padding: 12px 14px;
@@ -396,6 +483,14 @@ function onAddTempoPoint(): void {
 .hint.error {
   color: var(--accent-2);
   font-style: normal;
+}
+
+/* 功能开关的说明小字 */
+.flag-desc {
+  display: block;
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 /* 布局操作按钮行 */
