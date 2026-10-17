@@ -48,6 +48,15 @@ const comingSoonItems = [
 const changelog: { date: string; title: string; items: string[] }[] = [
   {
     date: '2026-10-17',
+    title: '品牌标识重新设计',
+    items: [
+      '新的标记图形：循环环（顺时针弧线 + 箭头）内嵌八分音符，取「Loop + 音乐」之意，与字标组合成完整标识',
+      '标识为单色矢量，通过 CSS mask 着色，顶栏与主页统一显示为白色',
+      '新增站点图标（浏览器标签页），沿用同一标记图形'
+    ]
+  },
+  {
+    date: '2026-10-17',
     title: '品牌 LOGO 换新',
     items: [
       '顶栏品牌图形更换为 Loopa 字标，并按新图形的比例调整了占位尺寸，避免留白',
@@ -607,13 +616,13 @@ function formatTime(timestamp: number): string {
 }
 
 /*
- * 品牌字标：源 SVG 是纯白 + 透明底，这里沿用顶栏的 CSS mask 方式着色，
- * 明确取白色，避免依赖主题令牌而出现偏色；容器尺寸按字标比例（约 2.06:1）设定。
+ * 品牌标识：源 SVG 是纯白 + 透明底，这里沿用顶栏的 CSS mask 方式着色，
+ * 明确取白色，避免依赖主题令牌而出现偏色；容器尺寸按标识比例（约 3.07:1）设定。
  */
 .brand-logo {
   display: block;
-  width: 64px;
-  height: 31px;
+  width: 98px;
+  height: 32px;
   margin-bottom: 18px;
   background-color: #ffffff;
   -webkit-mask: url('../assets/loopa-logo.svg') no-repeat left center / contain;
