@@ -6,12 +6,13 @@
  * - 右侧主内容区：
  *   - 主页：顶部大标题「欢迎使用 TonePome」，中间为音乐制作相关的简约线稿图标
  *     （钢琴键 / 音符 / 波形），下方是「编辑、效果和导出」标语
- *   - 新建项目：右栏列出「新建空白项目」与「导入音频 / 工程 JSON / MIDI」四种入口
+ *   - 新建项目：右栏列出「新建空白项目」「示例音频」与「导入音频 / 工程 JSON / MIDI」入口
  *   - 打开项目：右侧直接展示最近保存的工程列表，可打开 / 重命名 / 导出 JSON / 删除，不再使用弹窗
  * - 仅负责入口跳转：新建 → 新建工程并进入编辑器；加载工程 → 载入后进入编辑器
  * 复用项目现有主题令牌（--bg / --panel / --accent），深色暗色 UI，PC / 移动端自适应。
  */
 import { ref } from 'vue'
+import { createDemoAudioFile } from '@/core/demoAudio'
 import {
   deleteSavedProject,
   exportSavedProjectJson,
@@ -45,6 +46,22 @@ const comingSoonItems = [
  * 更新日志：按发布日期倒序，内容整理自真实提交历史
  */
 const changelog: { date: string; title: string; items: string[] }[] = [
+  {
+    date: '2026-10-17',
+    title: '问题修复',
+    items: [
+      '修复播放中通过「文件 → 返回主页」回到主页后音乐仍继续播放的问题：返回主页时自动暂停走带；录音中返回则先结束录音落盘'
+    ]
+  },
+  {
+    date: '2026-10-17',
+    title: '内置示例音频',
+    items: [
+      '「新建项目」新增「示例音频」入口：一键新建工程并载入内置示范音频',
+      '示范音频由代码实时合成（4 小节 @120 BPM：鼓组 + 贝斯 + 和弦 + 旋律），导出为 WAV 后走与用户上传文件完全相同的导入流程',
+      '鼓点落在整齐的拍点上，可直接用来体验波形修剪、分割与自动卡点'
+    ]
+  },
   {
     date: '2026-10-17',
     title: '主页新建与工程管理',
@@ -160,6 +177,19 @@ async function onCreateFromAudio(): Promise<void> {
   await importAudioFile(file)
   emit('enter')
   if (audioInput.value) audioInput.value.value = ''
+}
+
+/**
+ * 新建空白工程后导入内置示例音频。
+ * 示例音频由代码实时合成并编码成 WAV，再走与用户上传文件完全相同的导入流程，
+ * 保证「示例音频」与手动导入的表现一致。
+ */
+async function onCreateFromDemo(): Promise<void> {
+  newProject()
+  state.project.name = '示例音频示范'
+  state.statusText = '正在生成内置示例音频…'
+  await importAudioFile(createDemoAudioFile())
+  emit('enter')
 }
 
 /** 新建空白工程后导入 MIDI 文件（会继承文件里的速度与拍号） */
@@ -355,6 +385,24 @@ function formatTime(timestamp: number): string {
               </svg>
               <span class="c-title">新建空白项目</span>
               <span class="c-desc">从零开始，默认一条钢琴轨，可随后自由加轨</span>
+            </button>
+
+            <!-- 内置示例音频：整行宽卡片，突出「开箱即用」的示范入口 -->
+            <button class="create-card wide" @click="onCreateFromDemo">
+              <!-- 音符 + 波形图标 -->
+              <svg class="ci" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M10 16.5V6l7-1.6v10.4" />
+                <circle cx="7.5" cy="17.5" r="2.5" />
+                <circle cx="17" cy="15" r="2.5" />
+              </svg>
+              <span class="c-title">
+                示例音频
+                <span class="c-tag">内置</span>
+              </span>
+              <span class="c-desc">
+                一键新建工程并载入内置示范音频：4 小节 120 BPM 的鼓组 + 贝斯 + 和弦 + 旋律，
+                可直接体验波形编辑、修剪与自动卡点
+              </span>
             </button>
 
             <button class="create-card" @click="audioInput?.click()">
@@ -714,10 +762,29 @@ function formatTime(timestamp: number): string {
   color: var(--accent);
 }
 
+/* 整行宽卡片：用于「示例音频」这类需要更完整说明的入口 */
+.create-card.wide {
+  grid-column: 1 / -1;
+}
+
 .c-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
+}
+
+/* 「内置」小标签：标明该素材随应用一起打包，无需外部文件 */
+.c-tag {
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
 }
 
 .c-desc {

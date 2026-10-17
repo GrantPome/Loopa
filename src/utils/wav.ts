@@ -3,9 +3,22 @@
  * 自己实现编码，避免为了导出引入额外依赖。
  */
 export function audioBufferToWavBlob(buffer: AudioBuffer): Blob {
+  // 取出各声道数据（超出 2 声道时只保留前两个），其余交给通用编码函数
   const numChannels = Math.min(2, buffer.numberOfChannels)
-  const sampleRate = buffer.sampleRate
-  const numFrames = buffer.length
+  const channels: Float32Array[] = []
+  for (let c = 0; c < numChannels; c += 1) {
+    channels.push(buffer.getChannelData(c))
+  }
+  return pcmChannelsToWavBlob(channels, buffer.sampleRate)
+}
+
+/**
+ * 多声道 PCM（Float32）-> WAV(16bit PCM) Blob
+ * 供没有 AudioBuffer 的场景直接编码，例如代码实时合成的示例音频。
+ */
+export function pcmChannelsToWavBlob(channels: Float32Array[], sampleRate: number): Blob {
+  const numChannels = Math.min(2, channels.length)
+  const numFrames = channels[0]?.length ?? 0
 
   const bytesPerSample = 2
   const blockAlign = numChannels * bytesPerSample
@@ -50,12 +63,6 @@ export function audioBufferToWavBlob(buffer: AudioBuffer): Blob {
   writeString('data')
   view.setUint32(offset, dataSize, true)
   offset += 4
-
-  // 取出各声道数据（超出 2 声道时只保留前两个）
-  const channels: Float32Array[] = []
-  for (let c = 0; c < numChannels; c += 1) {
-    channels.push(buffer.getChannelData(c))
-  }
 
   // 交错写入并转成 16bit
   for (let frame = 0; frame < numFrames; frame += 1) {
