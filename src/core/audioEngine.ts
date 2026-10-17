@@ -183,6 +183,8 @@ class AudioEngine {
   private timeSignature: TimeSignature = '4/4'
   /** 当前工程的速度点表（scheduleProject 时随工程更新），供播放/跳转时锚定速度曲线 */
   private tempoPoints: TempoPoint[] = []
+  /** 低音区音量补偿是否开启（默认开启，设置页可关） */
+  private lowNoteBoost = true
 
   /** 播放触发音符时的回调（用于虚拟键盘高亮） */
   onNoteOn: ((midi: number, trackId: string) => void) | null = null
@@ -811,7 +813,7 @@ class AudioEngine {
             const seconds = note.duration * (60 / t.bpm.value)
             if (!channel.instrument) return
             if (drum) channel.instrument.triggerAttackRelease(note.midi, seconds, time, note.velocity)
-            else channel.instrument.triggerAttackRelease(midiToNoteName(note.midi), seconds, time, note.velocity)
+            else channel.instrument.triggerAttackRelease(midiToNoteName(note.midi), seconds, time, this.boostVelocity(note.midi, note.velocity))
             this.onNoteOn?.(note.midi, track.id)
           }, at)
           this.noteEventIds.push(eventId)
@@ -945,6 +947,21 @@ class AudioEngine {
   setLimiterThreshold(db: number): void {
     if (!this.graphReady) return
     setParamValue(this.limiter.threshold, db)
+  }
+
+  /** 低音区音量补偿开关：人耳与小型扬声器对低频敏感度低，低音音符常听不清 */
+  setLowNoteBoost(on: boolean): void {
+    this.lowNoteBoost = on
+  }
+
+  /**
+   * 低音区力度补偿：C4(60) 以下的旋律音符按音高逐级提升力度，
+   * 越低补偿越多（最低约 +60%），抵消低频响度感知下降。
+   * 鼓组按 MIDI 音号选音色，不做补偿。
+   */
+  private boostVelocity(midi: number, velocity: number): number {
+    if (!this.lowNoteBoost || midi >= 60) return velocity
+    return Math.min(1, velocity * (1 + ((60 - midi) / 48) * 0.8))
   }
 
   setTimeSignature(ts: TimeSignature): void {
@@ -1099,7 +1116,7 @@ class AudioEngine {
     // 排期到过去会导致事件瞬间全部触发产生爆音
     const now = Tone.getContext().currentTime + 0.005
     if (channel.drum) channel.instrument.triggerAttack(midi, now, velocity)
-    else channel.instrument.triggerAttack(midiToNoteName(midi), now, velocity)
+    else channel.instrument.triggerAttack(midiToNoteName(midi), now, this.boostVelocity(midi, velocity))
   }
 
   previewRelease(trackId: string, midi: number): void {
@@ -1124,7 +1141,7 @@ class AudioEngine {
     if (!channel || !channel.instrument) return
     const now = Tone.getContext().currentTime + 0.005
     if (channel.drum) channel.instrument.triggerAttackRelease(midi, 0.45, now, velocity)
-    else channel.instrument.triggerAttackRelease(midiToNoteName(midi), 0.45, now, velocity)
+    else channel.instrument.triggerAttackRelease(midiToNoteName(midi), 0.45, now, this.boostVelocity(midi, velocity))
   }
 
   /** 试听一个自定义音源采样（按原始音高原速播放） */
@@ -1372,7 +1389,7 @@ class AudioEngine {
         const seconds = note.duration * 60 / bpmAtBeat(region.start + note.start, tempoPoints, baseBpm)
         transport.schedule((time) => {
           if (drum) instrument.triggerAttackRelease(note.midi, seconds, time, note.velocity)
-          else instrument.triggerAttackRelease(midiToNoteName(note.midi), seconds, time, note.velocity)
+          else instrument.triggerAttackRelease(midiToNoteName(note.midi), seconds, time, this.boostVelocity(note.midi, note.velocity))
         }, at)
       }
     }

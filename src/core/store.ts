@@ -148,6 +148,8 @@ export interface AppState {
   keyboardVelocity: number
   /** 音量读数显示单位：dB 或线性（仅影响界面呈现，不改动底层增益） */
   volumeDisplay: VolumeDisplay
+  /** 低音区音量补偿：C4 以下旋律音符自动提升力度，默认开启 */
+  lowNoteBoost: boolean
   /** 当前 UI 适配的设备模式（pc / pad），用户可手动切换 */
   deviceMode: DeviceMode
   /** 设置对话框是否打开 */
@@ -535,6 +537,7 @@ interface UiPrefs {
   longPressDuration: number
   touchKeyboardAlwaysOn: boolean
   volumeDisplay: VolumeDisplay
+  lowNoteBoost: boolean
   velocityLaneOn: boolean
   noteColorByVelocity: boolean
   featureToggles: Record<FeatureKey, boolean>
@@ -563,6 +566,7 @@ function defaultUiPrefs(): UiPrefs {
     longPressDuration: 450,
     touchKeyboardAlwaysOn: true,
     volumeDisplay: 'db',
+    lowNoteBoost: true,
     velocityLaneOn: true,
     noteColorByVelocity: false,
     featureToggles: { ...DEFAULT_FEATURE_TOGGLES }
@@ -581,6 +585,7 @@ function readUiPrefs(): UiPrefs {
       longPressDuration: clamp(Number(parsed.longPressDuration) || base.longPressDuration, 150, 2000),
       touchKeyboardAlwaysOn: parsed.touchKeyboardAlwaysOn !== false,
       volumeDisplay: parsed.volumeDisplay === 'linear' ? 'linear' : 'db',
+      lowNoteBoost: parsed.lowNoteBoost !== false,
       velocityLaneOn: parsed.velocityLaneOn !== false,
       noteColorByVelocity: parsed.noteColorByVelocity === true,
       featureToggles: { ...base.featureToggles, ...(parsed.featureToggles ?? {}) }
@@ -600,6 +605,7 @@ function writeUiPrefs(): void {
         longPressDuration: state.longPressDuration,
         touchKeyboardAlwaysOn: state.touchKeyboardAlwaysOn,
         volumeDisplay: state.volumeDisplay,
+        lowNoteBoost: state.lowNoteBoost,
         velocityLaneOn: state.velocityLaneOn,
         noteColorByVelocity: state.noteColorByVelocity,
         featureToggles: state.featureToggles
@@ -642,6 +648,7 @@ export const state = reactive<AppState>({
   noteColorByVelocity: initialUiPrefs.noteColorByVelocity,
   keyboardVelocity: 0.85,
   volumeDisplay: initialUiPrefs.volumeDisplay,
+  lowNoteBoost: initialUiPrefs.lowNoteBoost,
   deviceMode: initialUiPrefs.deviceMode,
   settingsOpen: false,
   instrumentOpen: false,
@@ -706,6 +713,7 @@ function applyProjectToEngine(): void {
   engine.setLimiterThreshold(state.project.masterLimiter)
   engine.setLoop(state.loopOn)
   engine.setMetronome(state.metronomeOn, state.countInOn)
+  engine.setLowNoteBoost(state.lowNoteBoost)
 }
 
 /** 新建工程默认放两条轨道，避免首屏空白 */
@@ -2471,6 +2479,13 @@ export function setKeyboardVelocity(velocity: number): void {
 /** 切换音量读数单位：dB ↔ 线性百分比（全局生效，仅影响显示） */
 export function toggleVolumeDisplay(): void {
   state.volumeDisplay = state.volumeDisplay === 'db' ? 'linear' : 'db'
+  writeUiPrefs()
+}
+
+/** 切换低音区音量补偿（默认开启，实时生效于播放与弹奏） */
+export function toggleLowNoteBoost(): void {
+  state.lowNoteBoost = !state.lowNoteBoost
+  engine.setLowNoteBoost(state.lowNoteBoost)
   writeUiPrefs()
 }
 

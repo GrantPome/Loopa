@@ -19,6 +19,7 @@ import {
   setLongPressDuration,
   state,
   toggleFeature,
+  toggleLowNoteBoost,
   toggleNoteColor,
   toggleTouchKeyboardAlwaysOn,
   toggleVelocityLane,
@@ -212,6 +213,21 @@ function onAddTempoPoint(): void {
           </template>
 
           <template v-else-if="activeTab === 'audio'">
+            <section class="group">
+              <h3>低频补偿</h3>
+              <p class="desc">人耳和小型扬声器对低频敏感度低，C4 以下低音音符听不清。开启后自动提升低音区力度，不改动力度值本身。</p>
+              <label class="row switch-row">
+                <span class="label">低音区自动提音量</span>
+                <button
+                  class="toggle"
+                  :class="{ on: state.lowNoteBoost }"
+                  @click="toggleLowNoteBoost"
+                >
+                  {{ state.lowNoteBoost ? '开' : '关' }}
+                </button>
+              </label>
+            </section>
+
             <section class="group">
               <h3>乐器与音源</h3>
               <p class="desc">
